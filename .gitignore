@@ -1,0 +1,28 @@
+# Go
+api/bin/
+api/logister-api
+*.exe
+
+# Node
+ui/node_modules/
+ui/dist/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Runtime / build output
+*.log
+*.tsbuildinfo
+__pycache__/
+*.pyc
+
+# Graphify
+graphify-out/

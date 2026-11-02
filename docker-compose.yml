@@ -1,0 +1,73 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: logister
+      POSTGRES_PASSWORD: logister
+      POSTGRES_DB: logister
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U logister -d logister"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    environment:
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ports:
+      - "9200:9200"
+    volumes:
+      - osdata:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://logister:logister@postgres:5432/logister?sslmode=disable
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: logs
+      CORS_ORIGIN: http://localhost:3000
+      SEED_SAMPLE_LOGS: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8080
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+  # Prefer deploy/docker-compose.pipeline.yml from WSL (~/logister-runtime)
+  # when developing on Windows mounts (CRLF breaks busybox scripts).
+
+volumes:
+  pgdata:
+  osdata:
