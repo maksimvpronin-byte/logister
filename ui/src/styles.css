@@ -152,13 +152,37 @@ select {
   font-size: 0.8rem;
 }
 
-.error {
+.request-error {
   border: 1px solid color-mix(in srgb, var(--error) 50%, var(--line));
   color: var(--error);
   padding: 12px 14px;
   margin-bottom: 12px;
   background: color-mix(in srgb, var(--error) 10%, transparent);
 }
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.pagination button {
+  border: 1px solid var(--line);
+  background: var(--bg1);
+  color: var(--text);
+  padding: 8px 12px;
+  margin-left: 8px;
+  cursor: pointer;
+}
+
+.pagination button:disabled { opacity: 0.45; cursor: default; }
+.notice { color: var(--warn); font-size: 0.85rem; }
 
 .table-wrap {
   border: 1px solid var(--line);

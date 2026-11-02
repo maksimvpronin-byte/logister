@@ -25,6 +25,6 @@ ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO inputs (name, type, config)
 VALUES
-    ('http-json', 'http', '{"path":"/ingest/json"}'),
+    ('http-json', 'http', '{"path":"/api/ingest/json"}'),
     ('sample-seed', 'internal', '{"description":"Seeds demo messages on startup"}')
 ON CONFLICT (name) DO NOTHING;

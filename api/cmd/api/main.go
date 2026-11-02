@@ -12,6 +12,7 @@ import (
 	"github.com/logister/logister/api/internal/config"
 	"github.com/logister/logister/api/internal/db"
 	"github.com/logister/logister/api/internal/httpapi"
+	"github.com/logister/logister/api/internal/ingest"
 	"github.com/logister/logister/api/internal/search"
 	"github.com/logister/logister/api/internal/seed"
 )
@@ -25,17 +26,29 @@ func main() {
 		log.Fatalf("postgres: %v", err)
 	}
 	defer pool.Close()
+	if err := db.UpgradeMetadata(ctx, pool); err != nil {
+		log.Fatalf("metadata upgrade: %v", err)
+	}
 
 	osClient, err := search.NewClient(cfg.OpenSearchURL)
 	if err != nil {
 		log.Fatalf("opensearch client: %v", err)
 	}
 
-	if err := search.EnsureIndex(ctx, osClient, cfg.OpenSearchIndex); err != nil {
-		log.Fatalf("ensure index: %v", err)
+	baseIndex := cfg.OpenSearchIndex
+	prepareCtx, prepareCancel := context.WithTimeout(ctx, 15*time.Second)
+	prepareErr := osClient.PrepareStorage(prepareCtx, baseIndex)
+	prepareCancel()
+	if prepareErr != nil {
+		log.Printf("search storage preparation deferred; durable intake remains available: %v", prepareErr)
 	}
+	cfg.OpenSearchIndex = search.StorageIndex(baseIndex)
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() { defer close(workerDone); ingest.Run(workerCtx, db.NewIngestStore(pool), osClient, baseIndex) }()
+	defer func() { workerCancel(); <-workerDone }()
 
-	if cfg.SeedSampleLogs {
+	if cfg.SeedSampleLogs && prepareErr == nil {
 		if err := seed.SampleLogs(ctx, osClient, cfg.OpenSearchIndex); err != nil {
 			log.Printf("seed warning: %v", err)
 		}

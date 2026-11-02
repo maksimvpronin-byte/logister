@@ -1,13 +1,14 @@
-FROM golang:1.22-alpine AS build
+FROM golang:1.22-alpine@sha256:1699c10032ca2582ec89a24a1312d986a3f094aed3d5c1147b19880afe40e052 AS build
 WORKDIR /src
-RUN apk add --no-cache ca-certificates git
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -o /out/logister-api ./cmd/api
+RUN CGO_ENABLED=0 go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/logister-api ./cmd/api
 
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates curl
+FROM scratch
 WORKDIR /app
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/logister-api /app/logister-api
+USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/app/logister-api"]

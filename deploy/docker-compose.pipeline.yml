@@ -1,30 +1,29 @@
-version: "3.8"
+# Development pipeline for the host API. Build images from the project root:
+# docker compose build loggen fluent-bit
 
 services:
   loggen:
-    image: busybox:1.36
-    command: ["sh", "/scripts/generate.sh"]
+    image: logister-loggen:local
     environment:
       LOG_FILE: /logs/app.log
       LOG_HOST: app-01
-      INTERVAL_MS: "700"
+      INTERVAL_MS: "${LOG_INTERVAL_MS:-700}"
+      ROTATE_EVERY: "${LOG_ROTATE_EVERY:-500}"
+      MAX_MESSAGES: "${LOG_MAX_MESSAGES:-0}"
     volumes:
-      - ./runtime/loggen/generate.sh:/scripts/generate.sh:ro
       - loggen_data:/logs
     restart: unless-stopped
 
   fluent-bit:
-    image: fluent/fluent-bit:3.2.2
-    command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+    image: logister-fluent-bit:local
     environment:
-      INGEST_HOST: host.docker.internal
-      INGEST_PORT: "8080"
+      INGEST_HOST: "${INGEST_HOST:-host.docker.internal}"
+      INGEST_PORT: "${INGEST_PORT:-8080}"
     volumes:
-      - ./runtime/fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
-      - ./runtime/fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
       - loggen_data:/logs:ro
+      - fluent_bit_state:/var/lib/fluent-bit
     ports:
-      - "2020:2020"
+      - "127.0.0.1:${FLUENT_BIT_PORT:-2020}:2020"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -33,3 +32,4 @@ services:
 
 volumes:
   loggen_data:
+  fluent_bit_state:

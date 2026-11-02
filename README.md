@@ -12,7 +12,7 @@ From WSL (recommended; Docker lives there on this machine):
 cd /mnt/c/Users/Fidel/Documents/logister
 # optional, if OpenSearch fails to start:
 # sudo sysctl -w vm.max_map_count=262144
-docker-compose up --build -d
+docker compose up --build -d
 ```
 
 Then open http://localhost:3000
@@ -21,7 +21,7 @@ Then open http://localhost:3000
 
 ```bash
 # infra
-cd /mnt/c/Users/Fidel/Documents/logister && docker-compose up -d postgres opensearch
+cd /mnt/c/Users/Fidel/Documents/logister && docker compose up -d postgres opensearch
 
 # API
 export PATH=$HOME/sdk/go/bin:$PATH
@@ -43,16 +43,49 @@ Sample messages are seeded on first API start (optional).
 
 ### Live log pipeline (Fluent Bit)
 
-Synthetic app logs → file → Fluent Bit → `POST /api/ingest/json`:
+Synthetic app logs → file → supervised Fluent Bit → durable PostgreSQL queue → OpenSearch:
 
 ```bash
-# sync LF configs into WSL filesystem (avoids CRLF on /mnt/c)
+# build the custom generator and supervised sender first
+docker compose build loggen fluent-bit
+# sync the development pipeline definition into WSL
 python3 /mnt/c/Users/Fidel/Documents/logister/deploy/sync-runtime.py
 cd ~/logister-runtime
-INGEST_HOST=host.docker.internal docker-compose -f docker-compose.pipeline.yml up -d
+INGEST_HOST=host.docker.internal docker compose -f docker-compose.pipeline.yml up -d
 ```
 
-`loggen` writes JSON lines every ~700ms; Fluent Bit ships them into the API.
+`loggen` writes JSON lines with stable event IDs every ~700ms and retains rotated
+files; Fluent Bit ships them to `/api/ingest/fluent-bit`. HTTP 202 confirms an
+atomic PostgreSQL commit. OpenSearch indexing follows asynchronously.
+
+Fluent Bit keeps its read offsets and pending deliveries in the
+`fluent_bit_state` Docker volume. Keep this volume when recreating the shipper.
+See [ingestion behavior and upgrade instructions](docs/ingestion.md) before
+upgrading an existing pipeline. The versioned search index is `logs-v2`;
+the original `logs` index remains as a backup after migration.
+
+### Regression checks (WSL)
+
+```bash
+cd /mnt/c/Users/Fidel/Documents/logister/api
+export PATH=$HOME/sdk/go/bin:$PATH
+LOGISTER_TEST_DATABASE_URL='postgres://logister:logister@127.0.0.1:5432/logister?sslmode=disable' go test ./...
+go vet ./...
+cd ..
+docker compose build
+python3 deploy/tests/acceptance.py
+```
+
+The acceptance suite creates its own full Compose stack with private ports and
+volumes, then removes it. It checks deep snapshot pagination, retry deduplication,
+legacy migration, load, crashes, rotation and actual ENOSPC on quota filesystems.
+Use `--keep` to retain a test stack for browser checks. Compose v2 is required.
+
+For the UI, run `npm ci`, `npm test`, and `npm run build` in `ui`.
+The optional Windows browser check is `py ui/tests/browser_smoke.py` from the
+project root (Python Playwright and Edge required).
+See [search behavior and checks](docs/search.md) for snapshot lifetime and cursor
+navigation beyond 10,000 matches, and the [audit closure report](docs/audits/2026-11-03-reliability.md).
 
 ## Local workspace
 
@@ -68,8 +101,8 @@ new API or UI instance, stop the existing instance using the same port.
 
 Vertical slice only:
 
-- ingest sample / HTTP JSON into OpenSearch
-- Postgres for metadata (inputs, streams)
+- ingest sample / HTTP JSON through a durable PostgreSQL queue into OpenSearch
+- Postgres for metadata, atomic intake and retry identities
 - React UI with time-range search and Lucene-like query
 
 ## Stack

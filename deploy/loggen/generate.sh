@@ -2,9 +2,12 @@
 OUT="${LOG_FILE:-/logs/app.log}"
 HOST_NAME="${LOG_HOST:-app-01}"
 INTERVAL_MS="${INTERVAL_MS:-700}"
+ROTATE_EVERY="${ROTATE_EVERY:-500}"
+MAX_MESSAGES="${MAX_MESSAGES:-0}"
+RUN_ID=$(cat /proc/sys/kernel/random/uuid)
 
 mkdir -p "$(dirname "$OUT")"
-: > "$OUT"
+touch "$OUT"
 
 rand() {
   max="$1"
@@ -75,12 +78,25 @@ while true; do
   msg_esc=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  printf '{"timestamp":"%s","message":"%s","source":"%s","level":"%s","host":"%s","stream":"%s","fields":{"seq":%s,"path":"%s","client":"%s"}}\n' \
-    "$ts" "$msg_esc" "$source" "$level" "$HOST_NAME" "$stream" "$i" "$path" "$client" >> "$OUT"
+  line=$(printf '{"id":"%s-%s","timestamp":"%s","message":"%s","source":"%s","level":"%s","host":"%s","stream":"%s","fields":{"seq":%s,"path":"%s","client":"%s"}}' \
+    "$RUN_ID" "$i" "$ts" "$msg_esc" "$source" "$level" "$HOST_NAME" "$stream" "$i" "$path" "$client")
+  # On ENOSPC a write can be partial. Restore the last complete file and move it
+  # aside before retrying this same event, so tail never joins partial JSON lines.
+  while true; do
+    size=$(wc -c < "$OUT")
+    if printf '%s\n' "$line" >> "$OUT"; then break; fi
+    truncate -s "$size" "$OUT"
+    mv "$OUT" "$OUT.$RUN_ID.retry-$i" 2>/dev/null || true
+    sleep 1
+    touch "$OUT"
+  done
 
-  if [ $((i % 500)) -eq 0 ]; then
-    tail -n 200 "$OUT" > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
+  if [ "$ROTATE_EVERY" -gt 0 ] && [ $((i % ROTATE_EVERY)) -eq 0 ]; then
+    mv "$OUT" "$OUT.$RUN_ID.$i"
+    touch "$OUT"
   fi
+
+  if [ "$MAX_MESSAGES" -gt 0 ] && [ "$i" -ge "$MAX_MESSAGES" ]; then exit 0; fi
 
   if command -v usleep >/dev/null 2>&1; then
     usleep $((INTERVAL_MS * 1000))

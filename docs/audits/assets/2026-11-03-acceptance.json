@@ -1,0 +1,129 @@
+[
+  {
+    "test": "generated_pipeline",
+    "seconds": 1.679,
+    "passed": true,
+    "records": 300,
+    "rotations": 6
+  },
+  {
+    "test": "mixed_types",
+    "seconds": 0.961,
+    "passed": true,
+    "types": 6
+  },
+  {
+    "test": "legacy_migration",
+    "seconds": 1.959,
+    "passed": true,
+    "migrated_records": 200,
+    "original_backup_records": 200,
+    "new_mixed_records": 2
+  },
+  {
+    "test": "deep_snapshot",
+    "seconds": 4.558,
+    "passed": true,
+    "snapshot_records": 10050,
+    "last_offset": 10000,
+    "late_records_excluded": 1
+  },
+  {
+    "test": "lost_acknowledgement",
+    "seconds": 0.541,
+    "passed": true,
+    "acknowledged_records": 10,
+    "concurrent_retries": 8,
+    "duplicates_in_index": 0
+  },
+  {
+    "test": "load",
+    "seconds": 1.145,
+    "passed": true,
+    "records": 5000,
+    "workers": 8,
+    "accept_p95_ms": 44,
+    "end_to_end_seconds": 1.143
+  },
+  {
+    "test": "os_and_api_crash",
+    "seconds": 13.437,
+    "passed": true,
+    "accepted_while_search_offline": 400,
+    "duplicates_after_restart": 0
+  },
+  {
+    "test": "postgres_crash",
+    "seconds": 4.206,
+    "passed": true,
+    "previously_acknowledged": 100,
+    "retried_after_recovery": 50
+  },
+  {
+    "test": "shipper_crash",
+    "seconds": 10.771,
+    "passed": true,
+    "queued_records_survived_SIGKILL": 200,
+    "logical_duplicates_after_checkpoint_reset": 0
+  },
+  {
+    "test": "rotation",
+    "seconds": 7.472,
+    "passed": true,
+    "records": 600,
+    "rename_and_create": true,
+    "quiesced_copytruncate": true
+  },
+  {
+    "test": "shipper_burst",
+    "seconds": 4.071,
+    "passed": true,
+    "records": 5000
+  },
+  {
+    "test": "postgres_disk_full",
+    "seconds": 2.451,
+    "passed": true,
+    "atomic_rejection_on_ENOSPC": true,
+    "recovered_records": 200,
+    "host_disk_filled": false
+  },
+  {
+    "test": "source_disk_full",
+    "seconds": 8.25,
+    "passed": true,
+    "valid_source_records_after_ENOSPC": 300,
+    "unique_ids": 300
+  },
+  {
+    "test": "shipper_disk_full",
+    "seconds": 15.619,
+    "passed": true,
+    "source": "shipper-disk-c6f58d7e",
+    "records_after_shipper_ENOSPC": 100,
+    "automatic_recovery_after_freeing_space": true
+  },
+  {
+    "test": "reconcile",
+    "seconds": 6.107,
+    "passed": true,
+    "durable_records": 22617,
+    "indexed_records": 22617,
+    "pending": 0
+  },
+  {
+    "test": "ui_proxy_recovery",
+    "seconds": 2.229,
+    "passed": true,
+    "UI_recovers_after_API_address_change": true,
+    "preserved_records": 22617
+  },
+  {
+    "test": "final_reconcile",
+    "seconds": 1.574,
+    "passed": true,
+    "durable_records": 22617,
+    "indexed_records": 22617,
+    "pending": 0
+  }
+]

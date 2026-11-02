@@ -1,14 +1,12 @@
-version: "3.8"
-
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
     environment:
       POSTGRES_USER: logister
       POSTGRES_PASSWORD: logister
       POSTGRES_DB: logister
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -19,14 +17,14 @@ services:
       retries: 10
 
   opensearch:
-    image: opensearchproject/opensearch:2.17.1
+    image: opensearchproject/opensearch:2.17.1@sha256:1193b7c29c5d63028523728243cc4da047ac49f697a8f8105e5aeee2f89bcc4c
     environment:
       discovery.type: single-node
       plugins.security.disabled: "true"
       OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
       DISABLE_INSTALL_DEMO_CONFIG: "true"
     ports:
-      - "9200:9200"
+      - "127.0.0.1:${OPENSEARCH_PORT:-9200}:9200"
     volumes:
       - osdata:/usr/share/opensearch/data
     healthcheck:
@@ -36,6 +34,7 @@ services:
       retries: 20
 
   api:
+    image: logister-api:local
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -45,9 +44,9 @@ services:
       OPENSEARCH_URL: http://opensearch:9200
       OPENSEARCH_INDEX: logs
       CORS_ORIGIN: http://localhost:3000
-      SEED_SAMPLE_LOGS: "true"
+      SEED_SAMPLE_LOGS: "${SEED_SAMPLE_LOGS:-false}"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${API_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,19 +54,46 @@ services:
         condition: service_healthy
 
   ui:
+    image: logister-ui:local
     build:
       context: ./ui
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: http://localhost:8080
+        VITE_API_URL: ""
     ports:
-      - "3000:80"
+      - "127.0.0.1:${UI_PORT:-3000}:80"
     depends_on:
       - api
 
-  # Prefer deploy/docker-compose.pipeline.yml from WSL (~/logister-runtime)
-  # when developing on Windows mounts (CRLF breaks busybox scripts).
+  loggen:
+    image: logister-loggen:local
+    build: ./deploy/loggen
+    environment:
+      INTERVAL_MS: "${LOG_INTERVAL_MS:-700}"
+      ROTATE_EVERY: "${LOG_ROTATE_EVERY:-500}"
+      MAX_MESSAGES: "${LOG_MAX_MESSAGES:-0}"
+    volumes:
+      - loggen_data:/logs
+    restart: unless-stopped
+
+  fluent-bit:
+    image: logister-fluent-bit:local
+    build: ./deploy/fluent-bit
+    environment:
+      INGEST_HOST: api
+      INGEST_PORT: "8080"
+    volumes:
+      - loggen_data:/logs:ro
+      - fluent_bit_state:/var/lib/fluent-bit
+    ports:
+      - "127.0.0.1:${FLUENT_BIT_PORT:-2020}:2020"
+    depends_on:
+      - api
+      - loggen
+    restart: unless-stopped
 
 volumes:
   pgdata:
   osdata:
+  loggen_data:
+  fluent_bit_state:

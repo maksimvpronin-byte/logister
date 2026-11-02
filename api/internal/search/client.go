@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +16,8 @@ import (
 )
 
 type Client struct {
-	os *opensearch.Client
+	os        *opensearch.Client
+	cursorKey [32]byte
 }
 
 func NewClient(url string) (*Client, error) {
@@ -29,7 +31,11 @@ func NewClient(url string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{os: osClient}, nil
+	key, err := newCursorKey()
+	if err != nil {
+		return nil, err
+	}
+	return &Client{os: osClient, cursorKey: key}, nil
 }
 
 func (c *Client) Ping(ctx context.Context) error {
@@ -112,23 +118,39 @@ type Message struct {
 }
 
 type SearchParams struct {
-	Query    string
-	From     time.Time
-	To       time.Time
-	Stream   string
-	Size     int
-	Offset   int
+	Query  string
+	From   time.Time
+	To     time.Time
+	Stream string
+	Size   int
+	Offset int
 }
 
 type SearchResult struct {
-	Total    int64     `json:"total"`
-	TookMs   int64     `json:"took_ms"`
-	Messages []Message `json:"messages"`
+	Total          int64     `json:"total"`
+	TotalRelation  string    `json:"total_relation"`
+	TookMs         int64     `json:"took_ms"`
+	Messages       []Message `json:"messages"`
+	From           time.Time `json:"from"`
+	To             time.Time `json:"to"`
+	ResultWindow   int       `json:"result_window"`
+	NextCursor     string    `json:"next_cursor,omitempty"`
+	PreviousCursor string    `json:"previous_cursor,omitempty"`
+	SessionID      string    `json:"session_id,omitempty"`
+	Offset         int       `json:"offset"`
 }
 
+const (
+	DefaultPageSize = 50
+	MaxPageSize     = 200
+	MaxResultWindow = 10000
+)
+
+var ErrInvalidQuery = errors.New("invalid search query")
+
 func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*SearchResult, error) {
-	if p.Size <= 0 || p.Size > 200 {
-		p.Size = 50
+	if p.Size <= 0 || p.Size > MaxPageSize {
+		p.Size = DefaultPageSize
 	}
 	if p.Offset < 0 {
 		p.Offset = 0
@@ -163,8 +185,9 @@ func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*Sea
 	}
 
 	body := map[string]any{
-		"from": p.Offset,
-		"size": p.Size,
+		"track_total_hits": true,
+		"from":             p.Offset,
+		"size":             p.Size,
 		"sort": []any{
 			map[string]any{"@timestamp": map[string]any{"order": "desc"}},
 		},
@@ -188,6 +211,9 @@ func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*Sea
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	if res.IsError() {
+		if res.StatusCode == http.StatusBadRequest {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidQuery, string(raw))
+		}
 		return nil, fmt.Errorf("search: %s %s", res.Status(), string(raw))
 	}
 
@@ -195,7 +221,8 @@ func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*Sea
 		Took int64 `json:"took"`
 		Hits struct {
 			Total struct {
-				Value int64 `json:"value"`
+				Value    int64  `json:"value"`
+				Relation string `json:"relation"`
 			} `json:"total"`
 			Hits []struct {
 				ID     string         `json:"_id"`
@@ -208,9 +235,11 @@ func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*Sea
 	}
 
 	out := &SearchResult{
-		Total:    parsed.Hits.Total.Value,
-		TookMs:   parsed.Took,
-		Messages: make([]Message, 0, len(parsed.Hits.Hits)),
+		Total:         parsed.Hits.Total.Value,
+		TotalRelation: parsed.Hits.Total.Relation,
+		TookMs:        parsed.Took,
+		Messages:      make([]Message, 0, len(parsed.Hits.Hits)),
+		From:          p.From, To: p.To, ResultWindow: MaxResultWindow,
 	}
 	for _, hit := range parsed.Hits.Hits {
 		out.Messages = append(out.Messages, mapHit(hit.ID, hit.Source))
@@ -220,12 +249,12 @@ func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*Sea
 
 func mapHit(id string, src map[string]any) Message {
 	m := Message{
-		ID:      id,
-		Message: asString(src["message"]),
-		Source:  asString(src["source"]),
-		Level:   asString(src["level"]),
-		Host:    asString(src["host"]),
-		Stream:  asString(src["stream"]),
+		ID:       id,
+		Message:  asString(src["message"]),
+		Source:   asString(src["source"]),
+		Level:    asString(src["level"]),
+		Host:     asString(src["host"]),
+		Stream:   asString(src["stream"]),
 		Facility: asString(src["facility"]),
 	}
 	if ts, ok := src["@timestamp"].(string); ok {
@@ -254,6 +283,9 @@ func asString(v any) string {
 }
 
 func (c *Client) IndexMessage(ctx context.Context, index string, id string, doc map[string]any) error {
+	if id != "" {
+		doc["event_id"] = id
+	}
 	payload, err := json.Marshal(doc)
 	if err != nil {
 		return err

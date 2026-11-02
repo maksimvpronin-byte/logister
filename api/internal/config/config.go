@@ -3,12 +3,12 @@ package config
 import "os"
 
 type Config struct {
-	HTTPAddr         string
-	DatabaseURL      string
-	OpenSearchURL    string
-	OpenSearchIndex  string
-	CORSOrigin       string
-	SeedSampleLogs   bool
+	HTTPAddr        string
+	DatabaseURL     string
+	OpenSearchURL   string
+	OpenSearchIndex string
+	CORSOrigin      string
+	SeedSampleLogs  bool
 }
 
 func FromEnv() Config {
