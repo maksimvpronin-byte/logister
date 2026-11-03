@@ -45,12 +45,12 @@ with sync_playwright() as p:
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(args.url)
-    expect(page.get_by_text('postgres up', exact=True)).to_be_visible()
-    page.get_by_label('Stream', exact=True).select_option('new-stream')
-    page.get_by_role('textbox', name='Search query').fill('source:demo-app-123-*')
-    page.get_by_label('Time range', exact=True).select_option('custom')
-    page.get_by_label('From', exact=True).fill(local(start))
-    page.get_by_label('To', exact=True).fill(local(end))
+    expect(page.get_by_text('postgres доступен', exact=True)).to_be_visible()
+    page.get_by_label('Поток', exact=True).select_option('new-stream')
+    page.get_by_role('textbox', name='Поисковый запрос').fill('source:demo-app-123-*')
+    page.get_by_label('Период', exact=True).select_option('custom')
+    page.get_by_label('С', exact=True).fill(local(start))
+    page.get_by_label('По', exact=True).fill(local(end))
     expect(page.get_by_text('Times in Europe/Moscow.', exact=False)).to_be_visible()
     # Reproduce accidental wheel/arrow use while the date field has focus.
     # Values and applied results must stay unchanged until an explicit Search.
@@ -64,12 +64,12 @@ with sync_playwright() as p:
         page.mouse.wheel(0, 480)
         control.press('ArrowUp')
         control.press('ArrowDown')
-    expect(page.get_by_label('From', exact=True)).to_have_value(local(start))
-    expect(page.get_by_label('To', exact=True)).to_have_value(local(end))
+    expect(page.get_by_label('С', exact=True)).to_have_value(local(start))
+    expect(page.get_by_label('По', exact=True)).to_have_value(local(end))
     assert not wheel_requests
     print('PASS: focused date fields ignore wheel and arrow changes; no search is triggered', flush=True)
     with page.expect_response(lambda response: '/api/search?' in response.url) as response:
-        page.get_by_role('button', name='Search', exact=True).click()
+        page.get_by_role('button', name='Найти', exact=True).click()
     query = urllib.parse.parse_qs(urllib.parse.urlparse(response.value.url).query)
     assert 'relative' not in query
     assert timestamp(query['from'][0]) == start and timestamp(query['to'][0]) == end
@@ -79,47 +79,47 @@ with sync_playwright() as p:
         'actual': [(m['timestamp'], m['id']) for m in result['messages']],
     }
     expect(page.locator('.message-row')).to_have_count(10)
-    expect(page.get_by_label('Applied time range')).to_be_visible()
+    expect(page.get_by_label('Выбранный период')).to_be_visible()
     page.screenshot(path=str(args.artifacts/'absolute-time-range.png'), full_page=False)
     print('PASS: Moscow local times become exact UTC bounds; precisely 10 expected real records returned', flush=True)
 
     requests = []
     page.on('request', lambda req: requests.append(req.url) if '/api/search?' in req.url else None)
-    page.get_by_label('From', exact=True).fill(local(end))
-    page.get_by_role('button', name='Search', exact=True).click()
+    page.get_by_label('С', exact=True).fill(local(end))
+    page.get_by_role('button', name='Найти', exact=True).click()
     expect(page.get_by_role('alert')).to_contain_text('Start must be earlier than end.')
     assert not requests
-    page.get_by_label('To', exact=True).fill('')
-    page.get_by_role('button', name='Search', exact=True).click()
+    page.get_by_label('По', exact=True).fill('')
+    page.get_by_role('button', name='Найти', exact=True).click()
     expect(page.get_by_role('alert')).to_contain_text('Choose the end date and time.')
     assert not requests
     print('PASS: missing/equal bounds are rejected locally; prior results stay intact', flush=True)
 
-    page.get_by_label('Stream', exact=True).select_option('all')
-    page.get_by_role('textbox', name='Search query').fill('*')
-    page.get_by_label('From', exact=True).fill('2026-11-02T03:00')
-    page.get_by_label('To', exact=True).fill('2026-11-04T03:00')
+    page.get_by_label('Поток', exact=True).select_option('all')
+    page.get_by_role('textbox', name='Поисковый запрос').fill('*')
+    page.get_by_label('С', exact=True).fill('2026-11-02T03:00')
+    page.get_by_label('По', exact=True).fill('2026-11-04T03:00')
     with page.expect_response(lambda response: '/api/search?' in response.url) as initial_response:
-        page.get_by_role('button', name='Search', exact=True).click()
+        page.get_by_role('button', name='Найти', exact=True).click()
     original = initial_response.value.json()
     assert original['total'] > 100
-    page.get_by_label('From', exact=True).fill('2026-11-05T03:00')
+    page.get_by_label('С', exact=True).fill('2026-11-05T03:00')
     with page.expect_response(lambda response: '/api/search?' in response.url) as next_response:
-        page.get_by_role('button', name='Next page', exact=True).click()
+        page.get_by_role('button', name='Следующая страница', exact=True).click()
     cursor_query = urllib.parse.parse_qs(urllib.parse.urlparse(next_response.value.url).query)
     assert list(cursor_query) == ['cursor']
     next_page = next_response.value.json()
     assert next_page['from'] == original['from'] and next_page['to'] == original['to'] and next_page['offset'] == 100
     print('PASS: pagination keeps the applied absolute interval despite invalid draft edits', flush=True)
-    page.get_by_label('Time range', exact=True).select_option('1h')
+    page.get_by_label('Период', exact=True).select_option('1h')
     with page.expect_response(lambda response: '/api/search?' in response.url) as relative_response:
-        page.get_by_role('button', name='Search', exact=True).click()
+        page.get_by_role('button', name='Найти', exact=True).click()
     quick = urllib.parse.parse_qs(urllib.parse.urlparse(relative_response.value.url).query)
     assert quick['relative'] == ['1h'] and 'from' not in quick and 'to' not in quick
     page.set_viewport_size({'width': 390, 'height': 844})
-    page.get_by_label('Time range', exact=True).select_option('custom')
-    expect(page.get_by_label('From', exact=True)).to_have_value('2026-11-05T03:00')
-    expect(page.get_by_label('To', exact=True)).to_have_value('2026-11-04T03:00')
+    page.get_by_label('Период', exact=True).select_option('custom')
+    expect(page.get_by_label('С', exact=True)).to_have_value('2026-11-05T03:00')
+    expect(page.get_by_label('По', exact=True)).to_have_value('2026-11-04T03:00')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     assert not errors, errors
     print('PASS: relative presets remain available; custom inputs fit a mobile viewport', flush=True)

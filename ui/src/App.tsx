@@ -1,6 +1,12 @@
-import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
+import { streamDisplayTitle } from "./locale";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import StreamsSettings from "./StreamsSettings";
 import MessageDetails from "./MessageDetails";
+import AccessSettings from "./AccessSettings";
+import LDAPSettings from "./LDAPSettings";
+import IngestIndicator from "./IngestIndicator";
+import KafkaIndicator from "./KafkaIndicator";
+import type { Identity } from "./api";
 import { absoluteTimeRange, formatRangeTime, localDateTime } from "./timeRange";
 import { appendFieldSearch } from "./fieldSearch";
 import {
@@ -14,24 +20,56 @@ import {
 } from "./api";
 
 const RELATIVE_OPTIONS = [
-  { value: "15m", label: "Last 15 minutes" },
-  { value: "1h", label: "Last 1 hour" },
-  { value: "6h", label: "Last 6 hours" },
-  { value: "24h", label: "Last 24 hours" },
-  { value: "7d", label: "Last 7 days" },
+  { value: "15m", label: "За последние 15 минут" },
+  { value: "1h", label: "За последний час" },
+  { value: "6h", label: "За последние 6 часов" },
+  { value: "24h", label: "За последние сутки" },
+  { value: "7d", label: "За последние 7 дней" },
 ];
 
 const PAGE_SIZE = 100;
+type View = "search" | "streams" | "access" | "ldap";
+const viewPaths: Record<View, string> = { search: "#/messages", streams: "#/streams", access: "#/access", ldap: "#/ldap" };
+
+function viewFromLocation(administrator: boolean, canManageAccess: boolean): View {
+  if (window.location.hash === viewPaths.streams && administrator) return "streams";
+  if (window.location.hash === viewPaths.access && canManageAccess) return "access";
+  if (window.location.hash === viewPaths.ldap && canManageAccess) return "ldap";
+  return "search";
+}
 
 function formatTime(value: string) {
   if (!value) return "—";
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString();
+  return d.toLocaleString("ru-RU");
 }
 
-export default function App() {
-  const [view, setView] = useState<"search" | "streams">("search");
+export default function App({ identity, onLogout, sessionError }: { identity?: Identity; onLogout?: () => void; sessionError?: string }) {
+  const administrator = !identity || identity.administrator;
+  const canManageAccess = Boolean(identity?.administrator);
+  const [currentView, setCurrentView] = useState<View>(() => viewFromLocation(administrator, canManageAccess));
+  const view = (currentView === "access" || currentView === "ldap") && !canManageAccess || currentView === "streams" && !administrator ? "search" : currentView;
+
+  useEffect(() => {
+    function restoreView() {
+      const next = viewFromLocation(administrator, canManageAccess);
+      setCurrentView(next);
+      if (window.location.hash !== viewPaths[next]) {
+        const url = new URL(window.location.href);
+        url.hash = viewPaths[next];
+        window.history.replaceState(null, "", url);
+      }
+    }
+    restoreView();
+    window.addEventListener("hashchange", restoreView);
+    return () => window.removeEventListener("hashchange", restoreView);
+  }, [administrator, canManageAccess]);
+
+  function setView(next: View) {
+    setCurrentView(next);
+    window.location.hash = viewPaths[next];
+  }
   const [health, setHealth] = useState<Health | null>(null);
   const [healthLoading, setHealthLoading] = useState(true);
   const [healthError, setHealthError] = useState<string | null>(null);
@@ -65,7 +103,7 @@ export default function App() {
     let timeParams: { relative: string } | { from: string; to: string } | undefined;
     if (!cursor) {
       try { timeParams = relative === "custom" ? absoluteTimeRange(absoluteFrom, absoluteTo) : { relative }; }
-      catch (error) { setRangeError(error instanceof Error ? error.message : "Choose a valid time range."); return; }
+      catch (error) { setRangeError(error instanceof Error ? error.message : "Укажите корректный период."); return; }
     }
     setRangeError("");
     const requestId = ++searchRequest.current;
@@ -103,7 +141,7 @@ export default function App() {
       setAppliedRange({ from: result.from, to: result.to });
     } catch (e) {
       if (requestId !== searchRequest.current || controller.signal.aborted) return;
-      setError(e instanceof Error ? e.message : "Search failed");
+      setError(e instanceof Error ? e.message : "Не удалось выполнить поиск");
     } finally {
       if (requestId === searchRequest.current) setLoading(false);
     }
@@ -123,7 +161,7 @@ export default function App() {
       } catch (e) {
         if (active) {
           setHealth(null);
-          setHealthError(e instanceof Error ? e.message : "Service status is unavailable");
+          setHealthError(e instanceof Error ? e.message : "Состояние сервисов недоступно");
         }
       } finally {
         healthPending = false;
@@ -137,7 +175,7 @@ export default function App() {
         const result = await fetchStreams(controller.signal);
         if (active) { setStreams(result.streams); setStreamsError(null); }
       } catch (e) {
-        if (active) setStreamsError(e instanceof Error ? e.message : "Failed to load streams");
+        if (active) setStreamsError(e instanceof Error ? e.message : "Не удалось загрузить потоки");
       } finally { streamsPending = false; }
     }
     void refreshHealth();
@@ -161,24 +199,31 @@ export default function App() {
   }
 
   function serviceStatus(up: boolean | undefined) {
-    if (healthLoading) return "checking";
-    return up === undefined ? "unknown" : up ? "up" : "down";
+    if (healthLoading) return "проверка";
+    return up === undefined ? "неизвестно" : up ? "доступен" : "недоступен";
   }
 
   const canGoNext = messages.length > 0 && Boolean(nextCursor);
 
+  const selectedMessage = messages.find((m) => m.id === selected) ?? null;
+
   return (
     <div className="app">
       <header className="top">
-        <div className="brand">
-          <h1>
-            Log<span>ister</span>
-          </h1>
-          <p>Open log search — OpenSearch + Postgres</p>
-        </div>
+        <p className="brand-name">Logister</p>
+        <nav className="section-nav" aria-label="Разделы приложения">
+          <button type="button" aria-pressed={view === "search"} onClick={() => setView("search")}>Сообщения</button>
+          {administrator && <button type="button" aria-pressed={view === "streams"} onClick={() => setView("streams")}>Потоки и хранение</button>}
+          {identity?.administrator && <button type="button" aria-pressed={view === "access"} onClick={() => setView("access")}>Пользователи и роли</button>}
+          {identity?.administrator && <button type="button" aria-pressed={view === "ldap"} onClick={() => setView("ldap")}>Настройки LDAP</button>}
+        </nav>
         <div className="health">
+          {identity && <><span>{identity.username}</span><button type="button" onClick={onLogout}>Выйти</button></>}
           <span className={`pill ${health ? health.postgres ? "ok" : "bad" : ""}`}>
             postgres {serviceStatus(health?.postgres)}
+          </span>
+          <span className={`pill ${health ? health.redis ? "ok" : "bad" : ""}`}>
+            redis {serviceStatus(health?.redis)}
           </span>
           <span className={`pill ${health ? health.opensearch ? "ok" : "bad" : ""}`}>
             opensearch {serviceStatus(health?.opensearch)}
@@ -186,19 +231,22 @@ export default function App() {
         </div>
       </header>
 
-      <nav className="section-nav" aria-label="Workspace sections">
-        <button type="button" aria-pressed={view === "search"} onClick={() => setView("search")}>Messages</button>
-        <button type="button" aria-pressed={view === "streams"} onClick={() => setView("streams")}>Streams &amp; storage</button>
-      </nav>
-      {view === "streams" && <StreamsSettings onSaved={setStreams} />}
-      <section hidden={view !== "search"} aria-label="Message search">
+      <IngestIndicator />
+      {administrator && <KafkaIndicator />}
+
+      {sessionError && <p className="error" role="alert">{sessionError}</p>}
+
+      {view === "streams" && administrator && <StreamsSettings onSaved={setStreams} />}
+      {view === "access" && identity?.administrator && <AccessSettings />}
+      {view === "ldap" && identity?.administrator && <LDAPSettings />}
+      <section hidden={view !== "search"} aria-label="Поиск сообщений">
 
       <form className="searchbar" onSubmit={onSubmit} noValidate>
         <input
-          aria-label="Search query"
+          aria-label="Поисковый запрос"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder='query, e.g. level:error OR source:nginx'
+          placeholder="Запрос, например level:error OR source:nginx"
           spellCheck={false}
         />
         <select
@@ -211,105 +259,107 @@ export default function App() {
             }
             setRelative(value); setRangeError("");
           }}
-          aria-label="Time range"
+          aria-label="Период"
         >
           {RELATIVE_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
             </option>
           ))}
-          <option value="custom">Custom range</option>
+          <option value="custom">Произвольный период</option>
         </select>
         <select
           value={stream}
           onChange={(e) => setStream(e.target.value)}
-          aria-label="Stream"
+          aria-label="Поток"
         >
-          <option value="all">All messages</option>
+          <option value="all">Все сообщения</option>
           {streams.map((s) => (
               <option key={s.id} value={s.name === "all" ? "@default" : s.name}>
-                {s.name === "all" && s.title === "All messages" ? "Unmatched messages" : s.title}
+                {streamDisplayTitle(s)}
               </option>
             ))}
         </select>
         <button type="submit" disabled={loading}>
-          {loading ? "Searching…" : "Search"}
+          {loading ? "Поиск…" : "Найти"}
         </button>
         {relative === "custom" && <div className="absolute-range">
-          <label>From<input type="text" aria-label="From" placeholder="DD.MM.YYYY HH:mm:ss" autoComplete="off" spellCheck={false} required value={absoluteFrom} aria-invalid={Boolean(rangeError)} aria-describedby="time-range-help" onChange={event => { setAbsoluteFrom(event.target.value); setRangeError(""); }} /></label>
-          <label>To<input type="text" aria-label="To" placeholder="DD.MM.YYYY HH:mm:ss" autoComplete="off" spellCheck={false} required value={absoluteTo} aria-invalid={Boolean(rangeError)} aria-describedby="time-range-help" onChange={event => { setAbsoluteTo(event.target.value); setRangeError(""); }} /></label>
-          <p id="time-range-help">Format: DD.MM.YYYY HH:mm:ss (seconds optional). Times in {timeZone}. Both boundaries are included. Click Search to apply.</p>
+          <label>С<input type="text" aria-label="С" placeholder="ДД.ММ.ГГГГ ЧЧ:мм:сс" autoComplete="off" spellCheck={false} required value={absoluteFrom} aria-invalid={Boolean(rangeError)} aria-describedby="time-range-help" onChange={event => { setAbsoluteFrom(event.target.value); setRangeError(""); }} /></label>
+          <label>По<input type="text" aria-label="По" placeholder="ДД.ММ.ГГГГ ЧЧ:мм:сс" autoComplete="off" spellCheck={false} required value={absoluteTo} aria-invalid={Boolean(rangeError)} aria-describedby="time-range-help" onChange={event => { setAbsoluteTo(event.target.value); setRangeError(""); }} /></label>
+          <p id="time-range-help">Формат: ДД.ММ.ГГГГ ЧЧ:мм:сс (секунды необязательны). Часовой пояс: {timeZone}. Обе границы включены. Нажмите «Найти», чтобы применить.</p>
         </div>}
         {rangeError && <div className="request-error time-range-error" role="alert">{rangeError}</div>}
       </form>
 
-      {appliedRange && <div className="applied-range" aria-label="Applied time range">
-        Applied period: <time dateTime={appliedRange.from}>{formatRangeTime(appliedRange.from)}</time>
+      {appliedRange && <div className="applied-range" aria-label="Выбранный период">
+        Выбранный период: <time dateTime={appliedRange.from}>{formatRangeTime(appliedRange.from)}</time>
         <span aria-hidden="true"> — </span><time dateTime={appliedRange.to}>{formatRangeTime(appliedRange.to)}</time>
       </div>}
 
       <div className="meta">
         <span>
-          {total}{totalRelation === "gte" ? "+" : ""} hits · {tookMs} ms
+          {total}{totalRelation === "gte" ? "+" : ""} найдено · {tookMs} мс
         </span>
-        <span>Lucene-like query · stream filter from Postgres</span>
       </div>
 
       {healthError ? <div className="request-error" role="alert">{healthError}</div> : null}
       {streamsError ? <div className="request-error" role="alert">{streamsError}</div> : null}
       {error ? <div className="request-error" role="alert">{error}</div> : null}
 
-      {messages.length > 0 && !error ? (
-        <nav className="pagination" aria-label="Search result pages">
-          <span>Showing {offset + 1}–{offset + messages.length} of {total}{totalRelation === "gte" ? "+" : ""}</span>
-          <div>
-            <button type="button" aria-label="Previous page" disabled={loading || !previousCursor}
-              onClick={() => { void runSearch(Math.max(0, offset - PAGE_SIZE), true); }}>Previous</button>
-            <button type="button" aria-label="Next page" disabled={loading || !canGoNext}
-              onClick={() => { void runSearch(offset + PAGE_SIZE, true); }}>Next</button>
+      <div className="results">
+        <div className="result-list">
+          {messages.length > 0 && !error ? (
+            <nav className="pagination" aria-label="Страницы результатов поиска">
+              <span>Показаны {offset + 1}–{offset + messages.length} из {total}{totalRelation === "gte" ? "+" : ""}</span>
+              <div>
+                <button type="button" aria-label="Предыдущая страница" disabled={loading || !previousCursor}
+                  onClick={() => { void runSearch(Math.max(0, offset - PAGE_SIZE), true); }}>Назад</button>
+                <button type="button" aria-label="Следующая страница" disabled={loading || !canGoNext}
+                  onClick={() => { void runSearch(offset + PAGE_SIZE, true); }}>Далее</button>
+              </div>
+            </nav>
+          ) : null}
+          <div className="table-wrap" aria-busy={loading}>
+            {loading ? <div className="empty" role="status">Поиск…</div> : error ? null : messages.length === 0 ? (
+              <div className="empty">За выбранный период сообщений нет.</div>
+            ) : (
+              <table className="result-table">
+                <thead>
+                  <tr>
+                    <th>Время</th>
+                    <th>Уровень</th>
+                    <th>Источник</th>
+                    <th>Сообщение</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {messages.map((m) => (
+                    <tr key={m.id} className="message-row" data-selected={selected === m.id} onClick={() => setSelected(selected === m.id ? null : m.id)}>
+                      <td>{formatTime(m.timestamp)}</td>
+                      <td>
+                        <span className={`level ${m.level || "info"}`}>
+                          {m.level || "info"}
+                        </span>
+                      </td>
+                      <td>{m.source}</td>
+                      <td className="msg">
+                        <button className="message-toggle" type="button" aria-label={`${selected === m.id ? "Скрыть" : "Показать"} поля сообщения ${m.id}`} aria-expanded={selected === m.id} onClick={event => { event.stopPropagation(); setSelected(selected === m.id ? null : m.id); }}><span aria-hidden="true">{selected === m.id ? "▾" : "▸"}</span></button>
+                        <span className="msg-text">{m.message}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
-        </nav>
-      ) : null}
-
-      <div className="table-wrap" aria-busy={loading}>
-        {loading ? <div className="empty" role="status">Searching…</div> : error ? null : messages.length === 0 ? (
-          <div className="empty">No messages in this range.</div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Level</th>
-                <th>Source</th>
-                <th>Host</th>
-                <th>Message</th>
-              </tr>
-            </thead>
-            <tbody>
-              {messages.map((m) => (
-                <Fragment key={m.id}>
-                <tr className="message-row" data-selected={selected === m.id} onClick={() => setSelected(selected === m.id ? null : m.id)}>
-                  <td>{formatTime(m.timestamp)}</td>
-                  <td>
-                    <span className={`level ${m.level || "info"}`}>
-                      {m.level || "info"}
-                    </span>
-                  </td>
-                  <td>{m.source}</td>
-                  <td>{m.host}</td>
-                  <td className="msg">
-                    <button className="message-toggle" type="button" aria-label={`${selected === m.id ? "Hide" : "Show"} fields for message ${m.id}`} aria-expanded={selected === m.id} onClick={event => { event.stopPropagation(); setSelected(selected === m.id ? null : m.id); }}><span aria-hidden="true">{selected === m.id ? "▾" : "▸"}</span></button>
-                    {m.message}
-                  </td>
-                </tr>
-                {selected === m.id && <tr className="message-detail-row"><td colSpan={5}>
-                  <MessageDetails message={m} onClose={() => setSelected(null)} onSearch={(clause, exclude) => setQuery(current => appendFieldSearch(current, clause, exclude))} />
-                </td></tr>}
-                </Fragment>
-              ))}
-            </tbody>
-          </table>
-        )}
+        </div>
+        <aside className="result-detail" aria-label="Выбранное сообщение">
+          {selectedMessage ? (
+            <MessageDetails message={selectedMessage} onClose={() => setSelected(null)} onSearch={(clause, exclude) => setQuery(current => appendFieldSearch(current, clause, exclude))} />
+          ) : messages.length > 0 && !loading && !error ? (
+            <p className="detail-empty">Выберите сообщение, чтобы посмотреть его поля.</p>
+          ) : null}
+        </aside>
       </div>
       </section>
     </div>

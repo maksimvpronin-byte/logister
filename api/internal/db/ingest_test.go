@@ -143,3 +143,24 @@ func TestLegacyIdentityCompatibilityDoesNotWeakenNewPayloadHashes(t *testing.T) 
 		t.Fatal("v2 accepted changed payload", err)
 	}
 }
+
+func TestBatchTreatsRepeatedIdentityAsOneRow(t *testing.T) {
+	ctx, tx := ingestionTransaction(t)
+	store := NewIngestStore(tx)
+	event := testEvent("a", "same")
+	receipt, err := store.Accept(ctx, "test", "", "", []Event{event, event})
+	if err != nil || receipt.Count != 2 || receipt.Duplicates != 1 {
+		t.Fatalf("%+v %v", receipt, err)
+	}
+	var count int
+	if err := tx.QueryRow(ctx, "SELECT count(*) FROM ingest_events").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+	conflict := testEvent("b", "new")
+	if _, err := store.Accept(ctx, "test", "", "", []Event{conflict, testEvent("b", "other"), event}); !errors.Is(err, ErrIdentityConflict) {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(ctx, "SELECT count(*) FROM ingest_events").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("conflict wrote rows: count=%d err=%v", count, err)
+	}
+}

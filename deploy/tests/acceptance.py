@@ -39,7 +39,7 @@ class Stack:
             self.out = self.root / 'graphify-out/acceptance' / self.project
             self.out.mkdir(parents=True)
             allocated = {}
-            for key in ['POSTGRES_PORT', 'OPENSEARCH_PORT', 'API_PORT', 'UI_PORT', 'FLUENT_BIT_PORT']:
+            for key in ['POSTGRES_PORT', 'OPENSEARCH_PORT', 'API_PORT', 'UI_PORT', 'FLUENT_BIT_PORT', 'REDIS_PORT']:
                 with socket.socket() as sock:
                     sock.bind(('127.0.0.1', 0)); allocated[key] = str(sock.getsockname()[1])
             allocated.update(LOG_INTERVAL_MS='1', LOG_ROTATE_EVERY='50', LOG_MAX_MESSAGES='300', SEED_SAMPLE_LOGS='false')
@@ -100,6 +100,10 @@ class Stack:
         self.wait(lambda: self.count(source) >= count, f'{source}: {count} indexed')
         actual = self.count(source)
         assert actual == count, (source, actual, count)
+
+    def redis(self, *args):
+        result = self.docker('exec', '-i', self.container('redis'), 'redis-cli', *args)
+        return result.stdout.decode().strip()
 
     def sql(self, query):
         result = self.docker('exec', '-i', self.container('postgres'), 'psql', '-U', 'logister', '-d', 'logister', '-At', '-v', 'ON_ERROR_STOP=1', input=query.encode())
@@ -203,6 +207,7 @@ class Stack:
         log=(self.out/'migration-api.log').open('wb')
         env=dict(os.environ,HTTP_ADDR=f'127.0.0.1:{port}',
                  DATABASE_URL=f'postgres://logister:logister@127.0.0.1:{self.env["POSTGRES_PORT"]}/logister?sslmode=disable',
+                 REDIS_URL=f'redis://127.0.0.1:{self.env["REDIS_PORT"]}',
                  OPENSEARCH_URL=self.os,OPENSEARCH_INDEX=base,SEED_SAMPLE_LOGS='false')
         process=subprocess.Popen([str(binary)],env=env,stdout=log,stderr=log)
         try:
@@ -292,13 +297,13 @@ class Stack:
         self.wait(lambda:json.loads(self.docker('inspect',self.container('loggen')).stdout)[0]['State']['Status']=='exited',
                   'generator settled after recovery')
         def equal():
-            accepted,pending=map(int,self.sql("SELECT count(*),count(*) FILTER (WHERE published_at IS NULL) FROM ingest_events WHERE index_name='logs-v2' AND document IS NOT NULL").split('|'))
-            return pending==0 and accepted==self.count()
+            status, stats = self.request('/api/ingest/stats')
+            return status == 200 and stats['totals']['pending'] == 0 and stats['totals']['published'] == self.count()
         self.wait(equal,'all acknowledged records reconciled with search index')
         time.sleep(1)
         assert equal()
-        accepted=int(self.sql("SELECT count(*) FROM ingest_events WHERE index_name='logs-v2' AND document IS NOT NULL"))
-        return {'durable_records':accepted,'indexed_records':self.count(),'pending':0}
+        published = self.request('/api/ingest/stats')[1]['totals']['published']
+        return {'durable_records':published,'indexed_records':self.count(),'pending':0}
 
 
 def main():

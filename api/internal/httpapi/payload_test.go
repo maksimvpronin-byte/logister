@@ -45,6 +45,29 @@ func TestAnyJSONIsPreservedAndDisplayMetadataCannotLoseFields(t *testing.T) {
 		t.Fatal("extra-field change was not an identity conflict", response.Body.String())
 	}
 }
+func TestLongMessageExcerptKeepsFullPayloadIdentity(t *testing.T) {
+	handler, store := ingestHandler(t, 0)
+	head, tail := strings.Repeat("a", searchExcerptBytes), strings.Repeat("b", 200)
+	raw := `{"id":"long","message":"` + head + tail + `"}`
+	response, _ := ingestCall(t, handler, []byte(raw), false)
+	if response.Code != 202 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	doc := store.snapshots()[0]
+	message, _ := doc["message"].(string)
+	if message != head+"…" {
+		t.Fatalf("excerpt = %q", message)
+	}
+	original, _ := doc["payload_json"].(string)
+	if !strings.Contains(original, head+tail) {
+		t.Fatal("full message was dropped", original)
+	}
+	changed := `{"id":"long","message":"` + head + strings.Repeat("c", 200) + `"}`
+	response, _ = ingestCall(t, handler, []byte(changed), false)
+	if response.Code != 409 {
+		t.Fatal("tail change was ignored", response.Code, response.Body.String())
+	}
+}
 func TestRulesCanUseAnyFieldArrayAndExistence(t *testing.T) {
 	var req ingestRequest
 	if err := json.Unmarshal([]byte(`{"tenant":"acme","event":{"code":503},"tags":["blue","production"],"items":[{"status":500}],"empty":null,"field.with.dot":"x","number":900719925474099312345}`), &req); err != nil {

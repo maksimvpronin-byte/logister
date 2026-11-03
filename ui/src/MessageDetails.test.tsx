@@ -15,7 +15,7 @@ describe("message field viewer", () => {
   it("opens field actions by keyboard, closes on Escape and adds an indexed value", async () => {
     const user = userEvent.setup(); const onSearch = vi.fn();
     render(<MessageDetails message={{ ...message, payload_json: undefined }} onClose={vi.fn()} onSearch={onSearch} />);
-    const trigger = screen.getByRole("button", { name: "Actions for field host" });
+    const trigger = screen.getByRole("button", { name: "Действия с полем host" });
     vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(20, 50, 24, 24));
     await user.click(trigger);
     expect(screen.getByRole("menu")).toBeInTheDocument();
@@ -28,16 +28,16 @@ describe("message field viewer", () => {
     await user.click(screen.getByRole("menuitem", { name: /Исключить из поиска/ }));
     expect(onSearch).toHaveBeenCalledWith('host:"test\\-host"', true);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Нажмите Search");
+    expect(screen.getByRole("status")).toHaveTextContent("Нажмите «Найти»");
   });
   it("explains why a raw unindexed field cannot be added instead of producing a false filter", async () => {
     const user = userEvent.setup(); render(<MessageDetails message={message} onClose={vi.fn()} onSearch={vi.fn()} />);
-    const trigger = screen.getByRole("button", { name: "Actions for field app" });
+    const trigger = screen.getByRole("button", { name: "Действия с полем app" });
     vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(20, 50, 24, 24));
     await user.click(trigger);
     expect(screen.getByRole("menuitem", { name: /Добавить в поиск/ })).toBeDisabled();
     expect(screen.getByRole("menu")).toHaveTextContent("не входит в поисковый индекс");
-    await user.click(screen.getByRole("searchbox", { name: "Filter fields" }));
+    await user.click(screen.getByRole("searchbox", { name: "Фильтр полей" }));
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
   it("preserves numeric literals and distinguishes literal dotted keys from nested paths", () => {
@@ -57,21 +57,21 @@ describe("message field viewer", () => {
     expect(within(fields).getByText("503", { exact: true })).toBeInTheDocument();
     expect(within(fields).getByText("null", { selector: ".field-value" })).toBeInTheDocument();
     expect(within(fields).getByText("false")).toBeInTheDocument();
-    await user.type(screen.getByRole("searchbox", { name: "Filter fields" }), "response.status");
+    await user.type(screen.getByRole("searchbox", { name: "Фильтр полей" }), "response.status");
     expect(within(fields).getByText("503")).toBeInTheDocument();
     expect(within(fields).queryByText("app")).not.toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "JSON" }));
     expect(screen.getByRole("tabpanel")).toHaveTextContent("900719925474099312345");
     expect(screen.getByRole("tabpanel")).toHaveTextContent("1e999999");
     await user.keyboard("{ArrowLeft}");
-    expect(screen.getByRole("tab", { name: "Fields" })).toHaveFocus();
+    expect(screen.getByRole("tab", { name: "Поля" })).toHaveFocus();
   });
   it("shows old records without original JSON using their saved fields", async () => {
     const close = vi.fn();
     render(<MessageDetails message={{ ...message, payload_json: undefined, fields: { legacy: "old value" } }} onClose={close} />);
     expect(screen.getByText("old value")).toBeInTheDocument();
     expect(screen.getByText("test-host", { exact: true })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Close message details" }));
+    await userEvent.click(screen.getByRole("button", { name: "Закрыть подробности сообщения" }));
     expect(close).toHaveBeenCalledOnce();
   });
 });

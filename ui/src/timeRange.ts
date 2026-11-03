@@ -7,7 +7,7 @@ export function localDateTime(value: Date | string): string {
 
 function parseLocal(value: string, label: string): Date {
   value = value.trim();
-  if (!value) throw new Error(`Choose the ${label} date and time.`);
+  if (!value) throw new Error(`Укажите дату и время ${label === "start" ? "начала" : "окончания"} периода.`);
   const display = /^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
   if (display) value = `${display[3]}-${display[2]}-${display[1]}T${display[4]}:${display[5]}:${display[6] ?? "00"}`;
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
@@ -17,7 +17,7 @@ function parseLocal(value: string, label: string): Date {
     || date.getFullYear() !== Number(match[1]) || date.getMonth() + 1 !== Number(match[2])
     || date.getDate() !== Number(match[3]) || date.getHours() !== Number(match[4])
     || date.getMinutes() !== Number(match[5]) || date.getSeconds() !== Number(match[6] ?? 0)) {
-    throw new Error(`Enter a valid ${label} date and time (DD.MM.YYYY HH:mm:ss) in your local time zone.`);
+    throw new Error(`Укажите корректные дату и время ${label === "start" ? "начала" : "окончания"} периода (ДД.ММ.ГГГГ ЧЧ:мм:сс) в вашем часовом поясе.`);
   }
   return date;
 }
@@ -25,12 +25,12 @@ function parseLocal(value: string, label: string): Date {
 export function absoluteTimeRange(from: string, to: string): { from: string; to: string } {
   const start = parseLocal(from, "start");
   const end = parseLocal(to, "end");
-  if (start >= end) throw new Error("Start must be earlier than end.");
+  if (start >= end) throw new Error("Начало периода должно быть раньше окончания.");
   return { from: start.toISOString(), to: end.toISOString() };
 }
 
 export function formatRangeTime(value: string): string {
-  return new Date(value).toLocaleString(undefined, {
+  return new Date(value).toLocaleString("ru-RU", {
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
     minute: "2-digit", second: "2-digit", timeZoneName: "short",
   });

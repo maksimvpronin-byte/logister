@@ -12,9 +12,11 @@ are preserved as `payload_json`, returned alongside the decoded `payload`.
 Recognized string ID/delivery_id/stream retain their existing protocol meanings.
 
 The complete payload is stored as an unindexed JSON string, avoiding dynamic
-mapping conflicts and PostgreSQL JSONB numeric/NUL limitations. Routing reads
-the full input before projection. Legacy searchable `fields` are bounded for
-large values; response fields are restored from the original where available.
+mapping conflicts and numeric/NUL limitations. Routing reads
+the full input before projection. The searchable `message` is an excerpt of at
+most 500 bytes; the complete text remains in `payload_json` and is not indexed.
+Legacy searchable `fields` are bounded for large values; response fields are
+restored from the original where available.
 Expanded UI rows display structured fields by default, with the original
 JSON available in a separate tab and through the copy button.
 
@@ -32,12 +34,16 @@ The second endpoint accommodates Fluent Bit chunks; both use the same validation
 and durable acceptance path. Oversized bodies return 413, including bodies with
 unknown Content-Length. Invalid JSON/messages or empty batches return 400.
 
-HTTP 202 with `{"status":"accepted","count":N,"duplicates":D}` means that the
-entire batch has committed to PostgreSQL. Indexing in OpenSearch is asynchronous.
-An unavailable or full PostgreSQL returns 503 with `count: 0`; no valid prefix or
-batch receipt is committed. A connection lost during commit has an unknown
-outcome: retry with the same identities. Never interpret a missing response as
-proof that the batch was rejected.
+HTTP 202 with `{"status":"accepted","count":N,"duplicates":D}` means Redis has
+accepted the whole batch. Indexing in OpenSearch is asynchronous. A stream
+index refreshes every 30 seconds, so a new message can take that long to
+appear in search. Its translog is flushed every 5 seconds rather than on
+every batch. PostgreSQL
+stores stream settings and the index-generation catalog; it does not store the
+log body. Redis appends with `appendfsync everysec`, so this is not a
+synchronous commit on every batch: a crash can lose about the last second.
+An unavailable Redis or PostgreSQL returns 503 with `count: 0`. A connection
+lost during the write has an unknown outcome: retry with the same identities.
 
 ## Retry identities
 
@@ -57,13 +63,13 @@ events. Fluent Bit's fallback UUID survives queued HTTP retries, but rereading a
 source file generates a new UUID. Sources that must survive checkpoint resets
 must therefore include stable IDs in the file itself. The bundled generator does.
 
-PostgreSQL keeps accepted documents and identity receipts after publication.
-Configured stream retention can clear published payloads after their index is
-deleted; identity receipts remain to prevent resurrection of expired events.
-The publisher uses fixed OpenSearch document IDs and commits its publication
-receipt only after the whole projection batch succeeds. Retrying after a crash
-or a lost OpenSearch acknowledgement overwrites the same IDs. Monitor storage
-growth; receipt expiry is not implemented. See [stream retention](streams.md).
+Redis keeps the document body until OpenSearch acknowledges it, then deletes
+the body and keeps the identity hash. A retry of the same identity is a
+duplicate; a different payload is a conflict while that hash remains. Hashes
+accepted before this journal existed are not consulted. The publisher uses
+fixed OpenSearch document IDs and deletes the body only after the whole
+projection batch succeeds. Retrying after a crash or a lost acknowledgement
+overwrites the same IDs. See [stream retention](streams.md).
 
 ## Index schema and upgrade
 
@@ -78,8 +84,8 @@ properties support routing, but are not automatically searchable Lucene fields.
 On first startup, the API copies an existing base index into the versioned index,
 preserves document IDs, verifies counts, and marks the new mapping ready. The
 original index remains intact as a backup. An interrupted migration is retried.
-Search health remains degraded until preparation completes; durable intake can
-continue when PostgreSQL is available. The queue is published after preparation.
+Search health remains degraded until preparation completes; intake can continue
+when Redis and PostgreSQL are available. The queue is published after preparation.
 
 Stop legacy writers before upgrading a running installation. For the bundled
 legacy pipeline:
@@ -143,3 +149,21 @@ temporary transaction-local schemas and roll back their data.
 These checks simulate process crashes, not a physical host power cut, failed
 hardware, or arbitrary filesystem corruption. See the [closure report](audits/2026-11-03-reliability.md)
 for the measured scenarios and boundaries.
+
+## Показатели обработки
+
+`GET /api/ingest/stats` возвращает накопительные счётчики уникальных сообщений:
+`accepted` — принято в журнал Redis и назначен поток, `published` — запись
+в OpenSearch подтверждена и тело удалено из журнала, `pending` — ожидает
+подтверждения отправки. Повторная доставка с тем же идентификатором не увеличивает
+счётчики. Невалидные/отклонённые запросы в принятые не входят.
+
+Учёт начинается с включения управляемых индексов потоков; старые сообщения без
+назначенного индекса в эти показатели не входят. Удаление логов по сроку хранения
+не обнуляет накопительные значения. Это показатели доставки, а не текущее число
+документов в поиске. Ответ ограничен потоками с правом чтения текущего пользователя.
+
+Интерфейс обновляет значения каждую секунду. Скорость вычисляется по разнице
+двух последовательных измерений; после открытия страницы или ошибки нужно
+дождаться следующего измерения. При ошибке сохраняются последние значения
+с явным предупреждением об их актуальности.

@@ -1,0 +1,20 @@
+# Local LDAP integration. Merge with the root Compose file; see docs/roles.md.
+services:
+  api:
+    environment:
+      AUTH_ENABLED: "true"
+      AUTH_COOKIE_SECURE: "false"
+      AUTH_LOCAL_PASSWORD: ${AUTH_LOCAL_PASSWORD:?Set AUTH_LOCAL_PASSWORD in deploy/ldap/.env}
+      AUTH_SETTINGS_KEY: ${AUTH_SETTINGS_KEY:?Set AUTH_SETTINGS_KEY in deploy/ldap/.env}
+      LDAP_URL: ldap://ldap:389
+      LDAP_BIND_DN: uid=ldap-reader,ou=services,dc=logister,dc=test
+      LDAP_BIND_PASSWORD: ${LDAP_READER_PASSWORD:?Set LDAP_READER_PASSWORD}
+      LDAP_USERS_DN: ou=people,dc=logister,dc=test
+      LDAP_GROUPS_DN: ou=groups,dc=logister,dc=test
+    networks:
+      - default
+      - ldap
+networks:
+  ldap:
+    external: true
+    name: logister-ldap_default

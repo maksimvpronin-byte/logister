@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS streams (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text UNIQUE NOT NULL,
  title text NOT NULL, description text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE streams ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 ALTER TABLE streams ADD COLUMN IF NOT EXISTS routing jsonb NOT NULL DEFAULT '{"enabled":false,"priority":100,"match":"all","rules":[]}';
 ALTER TABLE streams ADD COLUMN IF NOT EXISTS storage jsonb NOT NULL DEFAULT '{"max_age_hours":24,"max_size_mb":1024,"max_documents":1000000,"retention_days":0}';
 CREATE TABLE IF NOT EXISTS stream_indices (
@@ -101,7 +102,7 @@ func scanStream(row pgx.Row) (Stream, error) {
 	return s, err
 }
 func (store *StreamStore) List(ctx context.Context) ([]Stream, error) {
-	rows, err := store.source.Query(ctx, `SELECT `+streamColumns+` FROM streams ORDER BY (name='all') DESC,(routing->>'priority')::int,name`)
+	rows, err := store.source.Query(ctx, `SELECT `+streamColumns+` FROM streams WHERE deleted_at IS NULL ORDER BY (name='all') DESC,(routing->>'priority')::int,name`)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +127,7 @@ func (store *StreamStore) Save(ctx context.Context, s Stream, create bool) (Stre
 	if create {
 		row = store.source.QueryRow(ctx, `INSERT INTO streams(name,title,description,routing,storage) VALUES($1,$2,$3,$4,$5) RETURNING `+streamColumns, s.Name, strings.TrimSpace(s.Title), s.Description, routing, storage)
 	} else {
-		row = store.source.QueryRow(ctx, `UPDATE streams SET title=$2,description=$3,routing=$4,storage=$5 WHERE name=$1 RETURNING `+streamColumns, s.Name, strings.TrimSpace(s.Title), s.Description, routing, storage)
+		row = store.source.QueryRow(ctx, `UPDATE streams SET title=$2,description=$3,routing=$4,storage=$5 WHERE name=$1 AND deleted_at IS NULL RETURNING `+streamColumns, s.Name, strings.TrimSpace(s.Title), s.Description, routing, storage)
 	}
 	saved, err := scanStream(row)
 	if errors.Is(err, pgx.ErrNoRows) {

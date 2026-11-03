@@ -1,0 +1,118 @@
+dn: dc=logister,dc=test
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+o: Logister LDAP Lab
+dc: logister
+
+dn: ou=people,dc=logister,dc=test
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=logister,dc=test
+objectClass: organizationalUnit
+ou: groups
+
+dn: ou=services,dc=logister,dc=test
+objectClass: organizationalUnit
+ou: services
+
+dn: cn=empty,ou=services,dc=logister,dc=test
+objectClass: organizationalRole
+cn: empty
+description: Non-login placeholder for groups without real members
+
+dn: uid=ldap-reader,ou=services,dc=logister,dc=test
+objectClass: inetOrgPerson
+uid: ldap-reader
+cn: LDAP Reader
+sn: Reader
+userPassword: @READER_HASH@
+
+dn: uid=operator,ou=people,dc=logister,dc=test
+objectClass: inetOrgPerson
+uid: operator
+cn: Test operator
+sn: operator
+mail: operator@logister.test
+userPassword: @USER_HASH@
+memberOf: cn=LOGISTER-payments-Operators,ou=groups,dc=logister,dc=test
+
+dn: uid=billing,ou=people,dc=logister,dc=test
+objectClass: inetOrgPerson
+uid: billing
+cn: Test billing
+sn: billing
+mail: billing@logister.test
+userPassword: @USER_HASH@
+memberOf: cn=LOGISTER-billing-Operators,ou=groups,dc=logister,dc=test
+
+dn: uid=service,ou=people,dc=logister,dc=test
+objectClass: inetOrgPerson
+uid: service
+cn: Test service
+sn: service
+mail: service@logister.test
+userPassword: @USER_HASH@
+memberOf: cn=LOGISTER-Ingest,ou=groups,dc=logister,dc=test
+
+dn: uid=administrator,ou=people,dc=logister,dc=test
+objectClass: inetOrgPerson
+uid: administrator
+cn: Test administrator
+sn: administrator
+mail: administrator@logister.test
+userPassword: @USER_HASH@
+memberOf: cn=LOGISTER-Admins,ou=groups,dc=logister,dc=test
+
+dn: uid=multi,ou=people,dc=logister,dc=test
+objectClass: inetOrgPerson
+uid: multi
+cn: Test multi
+sn: multi
+mail: multi@logister.test
+userPassword: @USER_HASH@
+memberOf: cn=LOGISTER-payments-Operators,ou=groups,dc=logister,dc=test
+memberOf: cn=LOGISTER-billing-Operators,ou=groups,dc=logister,dc=test
+memberOf: cn=LOGISTER-Ingest,ou=groups,dc=logister,dc=test
+
+dn: uid=no-role,ou=people,dc=logister,dc=test
+objectClass: inetOrgPerson
+uid: no-role
+cn: Test no-role
+sn: no-role
+mail: no-role@logister.test
+userPassword: @USER_HASH@
+
+dn: uid=disabled,ou=people,dc=logister,dc=test
+objectClass: inetOrgPerson
+uid: disabled
+cn: Test disabled
+sn: disabled
+mail: disabled@logister.test
+userPassword: {CRYPT}!
+memberOf: cn=LOGISTER-Admins,ou=groups,dc=logister,dc=test
+
+dn: cn=LOGISTER-payments-Operators,ou=groups,dc=logister,dc=test
+objectClass: groupOfNames
+cn: LOGISTER-payments-Operators
+member: uid=operator,ou=people,dc=logister,dc=test
+member: uid=multi,ou=people,dc=logister,dc=test
+
+dn: cn=LOGISTER-billing-Operators,ou=groups,dc=logister,dc=test
+objectClass: groupOfNames
+cn: LOGISTER-billing-Operators
+member: uid=billing,ou=people,dc=logister,dc=test
+member: uid=multi,ou=people,dc=logister,dc=test
+
+dn: cn=LOGISTER-Ingest,ou=groups,dc=logister,dc=test
+objectClass: groupOfNames
+cn: LOGISTER-Ingest
+member: uid=service,ou=people,dc=logister,dc=test
+member: uid=multi,ou=people,dc=logister,dc=test
+
+dn: cn=LOGISTER-Admins,ou=groups,dc=logister,dc=test
+objectClass: groupOfNames
+cn: LOGISTER-Admins
+member: uid=administrator,ou=people,dc=logister,dc=test
+member: uid=disabled,ou=people,dc=logister,dc=test

@@ -94,9 +94,10 @@ An already accepted event keeps its physical destination even when its first
 publication or a retry happens after rotation. Duplicate retries do not count
 toward the message threshold or allocate another generation.
 
-Writing targets are durable PostgreSQL metadata, rather than a moving write
-alias. This prevents a lost acknowledgement followed by rollover from putting
-the same event in two physical indices.
+A generation is recorded in PostgreSQL when it opens. Its live counter and the
+document body stay in Redis until publication. An accepted event keeps that
+physical destination, so a lost acknowledgement followed by rollover cannot put
+the same event in two indices.
 
 ## Retention and PostgreSQL cleanup
 
@@ -106,11 +107,10 @@ Indices with unpublished events are protected even if their retention age has
 passed. A temporary outage delays publication and deletion; it does not discard
 the durable queue.
 
-After OpenSearch acknowledges deletion (or confirms the index is already absent),
-the same lifecycle operation clears published document payloads for that physical
-index in PostgreSQL. Stable event IDs, hashes and batch receipts remain as small
-deduplication tombstones. An old source replay or HTTP retry cannot resurrect an
-expired event. Tombstone expiry and automatic source-file removal are not part
+The document body lives in Redis only until OpenSearch acknowledges publication.
+The identity hash stays in Redis, so a later retry cannot resurrect an expired
+event. PostgreSQL records the index generation and does not keep a second copy
+of the payload. Tombstone expiry and automatic source-file removal are not part
 of this policy.
 
 Changing retention applies to all managed indices of that stream, including
@@ -158,3 +158,26 @@ exercise day/hour boundaries without waiting in real time.
 `py ui/tests/streams_smoke.py --url http://localhost:3000` verifies creation,
 editing, sending, rotation, search and a mobile viewport in Edge. It creates a
 uniquely named fixture stream; use a retained isolated stack for regression runs.
+
+## Удаление и восстановление
+
+В настройках выбранного потока администратор может нажать «Удалить поток»
+и подтвердить действие вводом технического идентификатора. В окне удаления
+идентификатор можно выделить либо скопировать кнопкой «Скопировать», затем
+вставить в поле подтверждения. Поток исчезает
+из активного списка, поиска и автоматической маршрутизации. Новая явная отправка
+в него отклоняется; уже принятые сообщения продолжают доставляться.
+
+Удаление обратимо: «Удалённые потоки» → «Восстановить». Сохраняются идентификатор,
+настройки и назначения ролей. Логи живут по прежней политике хранения; удаление
+потока не останавливает retention и не обещает вечного сохранения данных.
+Создать другой поток с тем же именем нельзя — для этого нужно восстановление.
+Системный поток `all` защищён от удаления на сервере и в интерфейсе.
+
+Удалённые потоки исключаются из запросов поиска на сервере, включая общий поиск.
+Старые курсоры после изменения видимости недействительны: поиск нужно запустить заново.
+Новые пакеты, уже выбравшие поток до его удаления, дополнительно проверяются
+при блокировке строки потока в транзакции приёма.
+
+Если в Kafka уже лежат сообщения с явным указанием удалённого потока, consumer
+не пропускает их автоматически. Восстановите поток, чтобы продолжить чтение.

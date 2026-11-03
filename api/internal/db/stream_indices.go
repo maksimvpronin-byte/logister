@@ -38,7 +38,7 @@ func lockEventStreams(ctx context.Context, tx pgx.Tx, events []Event) error {
 	sort.Strings(ordered)
 	for _, name := range ordered {
 		var id string
-		if err := tx.QueryRow(ctx, `SELECT id::text FROM streams WHERE name=$1 FOR UPDATE`, name).Scan(&id); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id::text FROM streams WHERE name=$1 AND deleted_at IS NULL FOR UPDATE`, name).Scan(&id); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrStreamNotFound
 			}
@@ -48,38 +48,69 @@ func lockEventStreams(ctx context.Context, tx pgx.Tx, events []Event) error {
 	return nil
 }
 
-func assignStreamIndex(ctx context.Context, tx pgx.Tx, namespace, name string) (string, error) {
+// placeStreamEvents assigns count new events to the open generation. A full or
+// expired generation is sealed once; each generation's counter increases by the
+// number of events placed on it, including when a batch crosses the threshold.
+func placeStreamEvents(ctx context.Context, tx pgx.Tx, namespace, name string, count int) ([]string, error) {
+	if count < 1 {
+		return nil, nil
+	}
 	var streamID string
 	var storage StorageConfig
 	if err := tx.QueryRow(ctx, `SELECT id::text,storage FROM streams WHERE name=$1`, name).Scan(&streamID, &storage); err != nil {
-		return "", err
+		return nil, err
 	}
-	var target string
-	var accepted int64
-	var created time.Time
-	err := tx.QueryRow(ctx, `SELECT index_name,accepted_count,created_at FROM stream_indices WHERE namespace=$1 AND stream_id=$2 AND sealed_at IS NULL`, namespace, streamID).Scan(&target, &accepted, &created)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return "", err
-	}
-	due := target != "" && ((storage.MaxDocuments > 0 && accepted >= storage.MaxDocuments) || (storage.MaxAgeHours > 0 && time.Since(created) >= time.Duration(storage.MaxAgeHours)*time.Hour))
-	if due {
-		if _, err := tx.Exec(ctx, `UPDATE stream_indices SET sealed_at=now() WHERE index_name=$1`, target); err != nil {
-			return "", err
+	targets := make([]string, 0, count)
+	for count > 0 {
+		var target string
+		var accepted int64
+		var created time.Time
+		err := tx.QueryRow(ctx, `SELECT index_name,accepted_count,created_at FROM stream_indices WHERE namespace=$1 AND stream_id=$2 AND sealed_at IS NULL`, namespace, streamID).Scan(&target, &accepted, &created)
+		if errors.Is(err, pgx.ErrNoRows) {
+			target, accepted = "", 0
+		} else if err != nil {
+			return nil, err
 		}
-		target = ""
-	}
-	if target == "" {
-		var generation int64
-		if err := tx.QueryRow(ctx, `SELECT coalesce(max(generation),0)+1 FROM stream_indices WHERE namespace=$1 AND stream_id=$2`, namespace, streamID).Scan(&generation); err != nil {
-			return "", err
+		due := target != "" && ((storage.MaxDocuments > 0 && accepted >= storage.MaxDocuments) || (storage.MaxAgeHours > 0 && time.Since(created) >= time.Duration(storage.MaxAgeHours)*time.Hour))
+		if due {
+			if _, err := tx.Exec(ctx, `UPDATE stream_indices SET sealed_at=now() WHERE index_name=$1`, target); err != nil {
+				return nil, err
+			}
+			target, accepted = "", 0
 		}
-		target = fmt.Sprintf("%s-s-%s-%06d", namespace, strings.ReplaceAll(streamID, "-", ""), generation)
-		if _, err := tx.Exec(ctx, `INSERT INTO stream_indices(namespace,stream_id,index_name,generation) VALUES($1,$2,$3,$4)`, namespace, streamID, target, generation); err != nil {
-			return "", err
+		if target == "" {
+			var generation int64
+			if err := tx.QueryRow(ctx, `SELECT coalesce(max(generation),0)+1 FROM stream_indices WHERE namespace=$1 AND stream_id=$2`, namespace, streamID).Scan(&generation); err != nil {
+				return nil, err
+			}
+			target = fmt.Sprintf("%s-s-%s-%06d", namespace, strings.ReplaceAll(streamID, "-", ""), generation)
+			if _, err := tx.Exec(ctx, `INSERT INTO stream_indices(namespace,stream_id,index_name,generation) VALUES($1,$2,$3,$4)`, namespace, streamID, target, generation); err != nil {
+				return nil, err
+			}
+			accepted = 0
 		}
+		take := count
+		if storage.MaxDocuments > 0 {
+			room := storage.MaxDocuments - accepted
+			if room < 1 {
+				if _, err := tx.Exec(ctx, `UPDATE stream_indices SET sealed_at=now() WHERE index_name=$1`, target); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if int64(take) > room {
+				take = int(room)
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE stream_indices SET accepted_count=accepted_count+$2 WHERE index_name=$1`, target, take); err != nil {
+			return nil, err
+		}
+		for i := 0; i < take; i++ {
+			targets = append(targets, target)
+		}
+		count -= take
 	}
-	_, err = tx.Exec(ctx, `UPDATE stream_indices SET accepted_count=accepted_count+1 WHERE index_name=$1`, target)
-	return target, err
+	return targets, nil
 }
 
 func ListManagedIndices(ctx context.Context, source streamSource, namespace, name string) ([]ManagedIndex, error) {
@@ -110,7 +141,7 @@ func RotateStream(ctx context.Context, source transactionSource, namespace, name
 	}
 	defer tx.Rollback(context.Background())
 	var id string
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM streams WHERE name=$1 FOR UPDATE`, name).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM streams WHERE name=$1 AND deleted_at IS NULL FOR UPDATE`, name).Scan(&id); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, ErrStreamNotFound
 		}

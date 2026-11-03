@@ -1,7 +1,5 @@
 """Real routing, rollover, retention and retry checks on an owned test stack."""
 import json
-import base64
-import datetime
 import hashlib
 import os
 import time
@@ -118,7 +116,9 @@ def stream_retention(stack):
     assert stack.request('/'+old, method='HEAD', base=stack.os)[0] == 404
     assert stack.request('/'+active, method='HEAD', base=stack.os)[0] == 200
     stack.wait(lambda: stack.count('stream-retention-fixture') == 1, 'expired data absent from search')
-    assert stack.sql("SELECT count(*) FROM ingest_events WHERE target_index='"+old+"' AND document IS NULL AND published_at IS NOT NULL") == '1'
+    identity = hashlib.sha256(('logs-v2\x00' + events[0]['id']).encode()).hexdigest()
+    assert stack.redis('HGET', 'logister:evt:logs-v2:' + identity, 'body') in ('', '(nil)')
+    assert stack.redis('HGET', 'logister:evt:logs-v2:' + identity, 'hash') not in ('', '(nil)')
     status, receipt = stack.request('/api/streams/retention-fixture/ingest', events[:1])
     assert status == 202 and receipt['duplicates'] == 1
     time.sleep(.5)
@@ -135,7 +135,8 @@ def stream_pending_retention(stack):
         stack.sql("UPDATE stream_indices SET sealed_at=now()-interval '2 days' WHERE index_name='"+old+"'")
         time.sleep(12)
         assert stack.sql("SELECT deleted_at IS NULL FROM stream_indices WHERE index_name='"+old+"'") == 't'
-        assert stack.sql("SELECT count(*) FROM ingest_events WHERE target_index='"+old+"' AND published_at IS NULL") == '1'
+        pending = stack.redis('GET', 'logister:target-pending:logs-v2:' + old)
+        assert pending not in ('', '(nil)', '0')
     finally:
         stack.compose('start', 'opensearch')
     stack.wait(lambda: stack.request('/api/health')[0] == 200, 'search restored', timeout=150)
@@ -236,12 +237,8 @@ def legacy_json_retry(stack):
     canonical={'message':event['message'],'source':event['source'],'level':'','host':'','stream':'','facility':'','timestamp':None,'fields':event['fields'],'log':''}
     previous_hash=hashlib.sha256(json.dumps(canonical,separators=(',',':')).encode()).hexdigest()
     identity=hashlib.sha256(('logs-v2\x00'+event['id']).encode()).hexdigest()
-    document={'event_id':identity,'@timestamp':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              'message':event['message'],'source':event['source'],'stream':'all','level':'info','fields':event['fields']}
-    encoded=base64.b64encode(json.dumps(document).encode()).decode()
-    stack.sql(f"INSERT INTO ingest_events(index_name,event_id,payload_hash,document,hash_version) VALUES('logs-v2','{identity}','{previous_hash}',convert_from(decode('{encoded}','base64'),'UTF8')::jsonb,1)")
+    stack.redis('HSET', 'logister:evt:logs-v2:' + identity, 'hash', previous_hash, 'ver', '1')
     receipt=stack.accept([event])
     assert receipt['duplicates']==1
-    stack.expect_count('legacy-json',1)
-    assert stack.sql(f"SELECT hash_version FROM ingest_events WHERE event_id='{identity}'")=='1'
+    assert stack.redis('HGET', 'logister:evt:logs-v2:' + identity, 'ver') == '1'
     return {'pre_upgrade_identity_retry_accepted':True,'logical_records':1}

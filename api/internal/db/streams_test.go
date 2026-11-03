@@ -77,10 +77,32 @@ func TestStreamTargetsStayFixedAcrossRotationAndReplay(t *testing.T) {
 	if err != nil || len(indices) != 3 {
 		t.Fatalf("%+v %v", indices, err)
 	}
+	counts := map[int64]int64{}
 	for _, index := range indices {
+		counts[index.Generation] = index.AcceptedCount
 		if index.AcceptedCount > 2 {
 			t.Fatal("document threshold exceeded", index)
 		}
+	}
+	if counts[1] != 2 || counts[2] != 2 || counts[3] != 1 {
+		t.Fatal("batch did not fill each generation once", indices)
+	}
+	placed := map[string]string{}
+	rows, err := tx.Query(ctx, `SELECT event_id,target_index FROM ingest_events`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id, target string
+		if err := rows.Scan(&id, &target); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		placed[id] = target
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || placed["a"] == "" || placed["a"] != placed["b"] || placed["c"] != placed["d"] || placed["a"] == placed["c"] || placed["c"] == placed["e"] {
+		t.Fatal(placed, err)
 	}
 	var target string
 	if err := tx.QueryRow(ctx, `SELECT target_index FROM ingest_events WHERE event_id='a'`).Scan(&target); err != nil {
@@ -108,6 +130,29 @@ func TestStreamTargetsStayFixedAcrossRotationAndReplay(t *testing.T) {
 		t.Fatal(seen, err)
 	}
 }
+func TestBatchDuplicateDoesNotTakeAnotherIndexSlot(t *testing.T) {
+	ctx, tx := streamTransaction(t)
+	if _, err := NewStreamStore(tx).Save(ctx, validStream("payments"), true); err != nil {
+		t.Fatal(err)
+	}
+	store := NewIngestStore(tx)
+	first := testEvent("a", "a")
+	first.StreamName = "payments"
+	if _, err := store.Accept(ctx, "logs-v2", "", "", []Event{first}); err != nil {
+		t.Fatal(err)
+	}
+	second := testEvent("b", "b")
+	second.StreamName = "payments"
+	receipt, err := store.Accept(ctx, "logs-v2", "", "", []Event{first, second})
+	if err != nil || receipt.Count != 2 || receipt.Duplicates != 1 {
+		t.Fatalf("%+v %v", receipt, err)
+	}
+	indices, err := ListManagedIndices(ctx, tx, "logs-v2", "payments")
+	if err != nil || len(indices) != 1 || indices[0].AcceptedCount != 2 {
+		t.Fatal(indices, err)
+	}
+}
+
 func TestRetentionProtectsPendingAndKeepsRetryTombstones(t *testing.T) {
 	ctx, tx := streamTransaction(t)
 	stream := validStream("payments")

@@ -24,7 +24,7 @@ def os_and_api_crash(stack):
     stack.compose('stop', 'opensearch')
     events = stack.events('os-offline', 400, prefix='os-offline')
     stack.accept(events, 'os-offline')
-    assert int(stack.sql("SELECT count(*) FROM ingest_events WHERE published_at IS NULL")) >= 400
+    assert stack.request('/api/health')[1]['pending_messages'] >= 400
     stack.compose('kill', '-s', 'SIGKILL', 'api')
     stack.compose('start', 'api')
     stack.wait(lambda: stack.request('/api/ingest/json', events, key='os-offline')[0] == 202,
@@ -96,37 +96,17 @@ def shipper_burst(stack):
 
 
 def postgres_disk_full(stack):
-    # Only a separate quota tmpfs tablespace is filled, never the host filesystem.
-    container = stack.container('postgres')
-    relation_size = int(stack.sql("SELECT pg_relation_size('ingest_events')"))
-    assert relation_size < 60*1024*1024, ('test table is too large for the constrained quota', relation_size)
-    stack.docker('exec', '-u', '0', container, 'chown', 'postgres:postgres', '/quota')
-    stack.docker('exec', '-u', '0', container, 'chmod', '700', '/quota')
-    stack.sql("CREATE TABLESPACE fault_quota LOCATION '/quota'; ALTER TABLE ingest_events SET TABLESPACE fault_quota;")
-    # The heap can reuse existing free pages even when its filesystem is full.
-    # Force a real new-block write in the same ingestion transaction instead of
-    # relying on incidental heap fragmentation to trigger ENOSPC.
-    stack.sql("""CREATE TABLE quota_write_probe(payload text) TABLESPACE fault_quota;
-        CREATE FUNCTION quota_write_probe() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO quota_write_probe VALUES ('force a new database block'); RETURN NEW; END $$;
-        CREATE TRIGGER quota_write_probe BEFORE INSERT ON ingest_events
-        FOR EACH ROW WHEN (NEW.document->>'source'='disk-full') EXECUTE FUNCTION quota_write_probe();""")
-    try:
-        fill = stack.docker('exec', '-u', '0', container, 'dd', 'if=/dev/zero', 'of=/quota/test-fill', 'bs=1M', 'count=80', check=False)
-        assert fill.returncode != 0 and b'No space left' in fill.stderr, fill.stderr
-        before = int(stack.sql('SELECT count(*) FROM ingest_events'))
-        events = stack.events('disk-full', 200, prefix='disk-full', size=1000)
-        status, body = stack.request('/api/ingest/json', events, key='disk-full')
-        assert status == 503 and body['count'] == 0, (status, body)
-        after = int(stack.sql('SELECT count(*) FROM ingest_events'))
-        assert after == before, (before, after)
-        assert stack.sql("SELECT count(*) FROM ingest_batches WHERE batch_key='disk-full'") == '0'
-        stack.docker('exec', '-u', '0', container, 'rm', '/quota/test-fill')
-        stack.accept(events, 'disk-full'); stack.expect_count('disk-full', 200)
-        return {'atomic_rejection_on_ENOSPC': True, 'recovered_records': 200, 'host_disk_filled': False}
-    finally:
-        stack.docker('exec', '-u', '0', container, 'rm', '-f', '/quota/test-fill', check=False)
-        stack.sql('DROP TRIGGER quota_write_probe ON ingest_events; DROP FUNCTION quota_write_probe(); DROP TABLE quota_write_probe; ALTER TABLE ingest_events SET TABLESPACE pg_default; DROP TABLESPACE fault_quota;')
+    # Intake no longer writes log bodies to PostgreSQL. An unavailable Redis
+    # journal must reject the batch outright, then accept it after recovery.
+    stack.compose('stop', 'redis')
+    events = stack.events('disk-full', 20, prefix='journal-down')
+    status, body = stack.request('/api/ingest/json', events, key='journal-down')
+    assert status == 503 and body['count'] == 0, (status, body)
+    stack.compose('start', 'redis')
+    ready(stack)
+    stack.accept(events, 'journal-down')
+    stack.expect_count('disk-full', 20)
+    return {'journal_rejects_while_redis_down': True, 'recovered_records': 20}
 
 
 def source_disk_full(stack):

@@ -98,6 +98,15 @@ func (s *Server) handleStreamIndices(w http.ResponseWriter, r *http.Request) {
 	if len(indices) > 100 {
 		indices = indices[:100]
 	}
+	if s.intake != nil {
+		if active, count, ok := s.intake.ActiveAccepted(r.Context(), s.cfg.OpenSearchIndex, name); ok {
+			for i := range indices {
+				if indices[i].Name == active && indices[i].SealedAt == nil {
+					indices[i].AcceptedCount = count
+				}
+			}
+		}
+	}
 	out := []map[string]any{}
 	for _, index := range indices {
 		row := map[string]any{"name": index.Name, "generation": index.Generation, "created_at": index.CreatedAt, "sealed_at": index.SealedAt, "deleted_at": index.DeletedAt, "accepted_count": index.AcceptedCount}
@@ -117,7 +126,18 @@ func (s *Server) handleStreamIndices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"indices": out, "legacy_preserved": true})
 }
 func (s *Server) handleRotateStream(w http.ResponseWriter, r *http.Request) {
-	rotated, err := db.RotateStream(r.Context(), s.pool, s.cfg.OpenSearchIndex, r.PathValue("name"), "")
+	name := r.PathValue("name")
+	noted := false
+	if s.intake != nil {
+		var err error
+		noted, err = s.intake.NoteRotation(r.Context(), s.cfg.OpenSearchIndex, name, "")
+		if err != nil {
+			log.Printf("rotate stream: %v", err)
+			writeError(w, 503, "Could not rotate this stream. Please retry.")
+			return
+		}
+	}
+	rotated, err := db.RotateStream(r.Context(), s.pool, s.cfg.OpenSearchIndex, name, "")
 	if err != nil {
 		if errors.Is(err, db.ErrStreamNotFound) {
 			writeError(w, 404, "Stream not found.")
@@ -127,5 +147,5 @@ func (s *Server) handleRotateStream(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, 200, map[string]any{"rotated": rotated})
+	writeJSON(w, 200, map[string]any{"rotated": noted || rotated})
 }

@@ -18,6 +18,7 @@ import (
 var ErrExpiredCursor = errors.New("search session expired or invalid")
 
 type pageCursor struct {
+	Access        string            `json:"access,omitempty"`
 	PIT           string            `json:"pit"`
 	After         []json.RawMessage `json:"after,omitempty"`
 	Query, Stream string
@@ -61,6 +62,17 @@ func (c *Client) openCursor(token string) (pageCursor, error) {
 }
 
 func (c *Client) CloseSearch(ctx context.Context, pit string) error {
+	if accessFingerprint(ctx) != "" {
+		cursor, err := c.openCursor(pit)
+		if err != nil || cursor.Access != accessFingerprint(ctx) {
+			return ErrExpiredCursor
+		}
+		pit = cursor.PIT
+	}
+	return c.closePIT(ctx, pit)
+}
+
+func (c *Client) closePIT(ctx context.Context, pit string) error {
 	if pit == "" {
 		return nil
 	}
@@ -85,6 +97,9 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 		if err != nil {
 			return nil, err
 		}
+		if cursor.Access != accessFingerprint(ctx) {
+			return nil, ErrExpiredCursor
+		}
 	} else {
 		if e := c.Ready(ctx, index); e != nil {
 			return nil, e
@@ -102,14 +117,14 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 		if json.Unmarshal(raw, &response) != nil || response.ID == "" {
 			return nil, errors.New("invalid PIT response")
 		}
-		cursor = pageCursor{PIT: response.ID, Query: p.Query, Stream: p.Stream, From: p.From, To: p.To, Size: p.Size, Offset: p.Offset}
+		cursor = pageCursor{Access: accessFingerprint(ctx), PIT: response.ID, Query: p.Query, Stream: p.Stream, From: p.From, To: p.To, Size: p.Size, Offset: p.Offset}
 		created = true
 	}
 	defer func() {
 		if created && err != nil {
 			cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			_ = c.CloseSearch(cleanup, cursor.PIT)
+			_ = c.closePIT(cleanup, cursor.PIT)
 		}
 	}()
 	q := strings.TrimSpace(cursor.Query)
@@ -117,6 +132,16 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 		q = "*"
 	}
 	must := []any{map[string]any{"query_string": map[string]any{"query": q, "default_field": "message", "analyze_wildcard": true, "lenient": true}}, map[string]any{"range": map[string]any{"@timestamp": timestampRange(cursor.From, cursor.To)}}}
+	if access, ok := ctx.Value(accessKey{}).(searchAccess); ok && access.Streams != nil {
+		if len(access.Streams) == 0 {
+			must = append(must, map[string]any{"match_none": map[string]any{}})
+		} else {
+			must = append(must, map[string]any{"terms": map[string]any{"stream": access.Streams}})
+		}
+	}
+	if excluded, _ := ctx.Value(excludedKey{}).([]string); len(excluded) > 0 {
+		must = append(must, map[string]any{"bool": map[string]any{"must_not": map[string]any{"terms": map[string]any{"stream": excluded}}}})
+	}
 	if cursor.Stream != "" && cursor.Stream != "all" {
 		stream := cursor.Stream
 		if stream == "@default" {
@@ -197,6 +222,9 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 		}
 	}
 	result = &SearchResult{Total: parsed.Hits.Total.Value, TotalRelation: parsed.Hits.Total.Relation, TookMs: parsed.Took, From: cursor.From, To: cursor.To, Messages: make([]Message, 0, len(hits)), SessionID: cursor.PIT, Offset: cursor.Offset}
+	if cursor.Access != "" {
+		result.SessionID = c.sealCursor(pageCursor{PIT: cursor.PIT, Access: cursor.Access, Size: 1})
+	}
 	for _, hit := range hits {
 		result.Messages = append(result.Messages, mapHit(hit.ID, hit.Source))
 	}
@@ -219,7 +247,7 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 			result.PreviousCursor = c.sealCursor(previous)
 		}
 	} else if created {
-		_ = c.CloseSearch(ctx, cursor.PIT)
+		_ = c.closePIT(ctx, cursor.PIT)
 		result.SessionID = ""
 	}
 	return result, nil

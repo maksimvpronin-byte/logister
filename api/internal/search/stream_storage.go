@@ -12,7 +12,10 @@ import (
 
 func ReadAlias(namespace string) string { return namespace + "-read" }
 func storageDefinition(alias string) map[string]any {
-	return map[string]any{"settings": map[string]any{"number_of_shards": 1, "number_of_replicas": 0}, "aliases": map[string]any{alias: map[string]any{}}, "mappings": map[string]any{
+	return map[string]any{"settings": map[string]any{
+		"number_of_shards": 1, "number_of_replicas": 0,
+		"refresh_interval": "30s", "translog.durability": "async", "translog.sync_interval": "5s",
+	}, "aliases": map[string]any{alias: map[string]any{}}, "mappings": map[string]any{
 		"_meta": map[string]any{"schema_version": 2, "ready": true}, "properties": map[string]any{
 			"@timestamp": map[string]any{"type": "date"}, "event_id": map[string]any{"type": "keyword"}, "message": map[string]any{"type": "text"},
 			"source": map[string]any{"type": "keyword"}, "level": map[string]any{"type": "keyword"}, "host": map[string]any{"type": "keyword"}, "stream": map[string]any{"type": "keyword"}, "facility": map[string]any{"type": "keyword"}, "fields": map[string]any{"type": "flat_object"},

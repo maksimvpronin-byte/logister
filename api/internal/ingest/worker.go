@@ -3,14 +3,19 @@ package ingest
 import (
 	"context"
 	"github.com/logister/logister/api/internal/db"
+	"github.com/logister/logister/api/internal/redisingest"
 	"github.com/logister/logister/api/internal/search"
 	"log"
 	"time"
 )
 
-// Run retries both index preparation and publication. The database outbox is the
-// durable authority; OpenSearch can be offline without losing accepted records.
-func Run(ctx context.Context, store *db.IngestStore, client *search.Client, base string) {
+type Publisher interface {
+	Publish(context.Context, string, func([]db.Event) error) (int, error)
+}
+
+// Run retries both index preparation and publication. The intake journal keeps
+// accepted records while OpenSearch is offline.
+func Run(ctx context.Context, store Publisher, client *search.Client, base string) {
 	ready := false
 	for ctx.Err() == nil {
 		task, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -38,7 +43,7 @@ func Run(ctx context.Context, store *db.IngestStore, client *search.Client, base
 			log.Printf("durable publisher retry: %v", err)
 			delay = time.Second
 		}
-		if count == 200 && err == nil {
+		if count == redisingest.PublishBatch && err == nil {
 			continue
 		}
 		timer := time.NewTimer(delay)

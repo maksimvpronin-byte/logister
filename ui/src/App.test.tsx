@@ -1,3 +1,5 @@
+vi.mock("./KafkaIndicator", () => ({ default: () => <div /> }));
+vi.mock("./IngestIndicator", () => ({ default: () => <div /> }));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,11 +22,12 @@ function result(offset = 0, total = 250) {
 }
 
 beforeEach(() => {
+  window.history.replaceState(null, "", "/");
   vi.resetAllMocks();
   vi.mocked(closeSearchSession).mockResolvedValue(undefined);
-  vi.mocked(fetchHealth).mockResolvedValue({ status: 'ok', postgres: true, opensearch: true, time: range.to });
+  vi.mocked(fetchHealth).mockResolvedValue({ status: 'ok', postgres: true, redis: true, opensearch: true, time: range.to });
   vi.mocked(fetchStreams).mockResolvedValue({ streams: [
-    { id: 'all', name: 'all', title: 'All messages', description: '' },
+    { id: 'all', name: 'all', title: "Все сообщения", description: '' },
     { id: 'web', name: 'web-access', title: 'Web access', description: '' },
   ] });
   vi.mocked(searchLogs).mockResolvedValue(result());
@@ -36,15 +39,15 @@ describe('existing search UI', () => {
   it('adds field-menu conditions to the query draft and applies them on Search', async () => {
     const user = userEvent.setup(); render(<App />);
     await screen.findByText('message-0', { exact: true });
-    await user.clear(screen.getByLabelText('Search query')); await user.type(screen.getByLabelText('Search query'), 'level:error OR level:warn');
-    await user.click(screen.getByRole('button', { name: 'Show fields for message 0' }));
-    const trigger = screen.getByRole('button', { name: 'Actions for field source' });
+    await user.clear(screen.getByLabelText("Поисковый запрос")); await user.type(screen.getByLabelText("Поисковый запрос"), 'level:error OR level:warn');
+    await user.click(screen.getByRole('button', { name: "Показать поля сообщения 0" }));
+    const trigger = screen.getByRole('button', { name: "Действия с полем source" });
     vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue(new DOMRect(20, 50, 24, 24));
     await user.click(trigger);
     await user.click(screen.getByRole('menuitem', { name: /Добавить в поиск/ }));
-    expect(screen.getByLabelText('Search query')).toHaveValue('(level:error OR level:warn) AND (source:"nginx")');
+    expect(screen.getByLabelText("Поисковый запрос")).toHaveValue('(level:error OR level:warn) AND (source:"nginx")');
     expect(searchLogs).toHaveBeenCalledTimes(1);
-    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await user.click(screen.getByRole('button', { name: "Найти" }));
     await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(2));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ q: '(level:error OR level:warn) AND (source:"nginx")', relative: '24h' }));
   });
@@ -53,30 +56,30 @@ describe('existing search UI', () => {
     vi.mocked(searchLogs).mockResolvedValueOnce(result()).mockResolvedValueOnce(result()).mockResolvedValueOnce(result(100));
     render(<App />);
     await screen.findByText('message-0', { exact: true });
-    await user.selectOptions(screen.getByLabelText('Time range'), 'custom');
-    fireEvent.change(screen.getByLabelText('From', { exact: true }), { target: { value: '2026-11-03T03:00:00' } });
-    fireEvent.change(screen.getByLabelText('To', { exact: true }), { target: { value: '2026-11-03T04:00:00' } });
-    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await user.selectOptions(screen.getByLabelText("Период"), 'custom');
+    fireEvent.change(screen.getByLabelText("С", { exact: true }), { target: { value: '2026-11-03T03:00:00' } });
+    fireEvent.change(screen.getByLabelText("По", { exact: true }), { target: { value: '2026-11-03T04:00:00' } });
+    await user.click(screen.getByRole('button', { name: "Найти" }));
     await screen.findByText('message-0', { exact: true });
     const request = vi.mocked(searchLogs).mock.calls[1][0];
     expect(request.from).toBe(new Date(2026, 10, 3, 3).toISOString());
     expect(request.to).toBe(new Date(2026, 10, 3, 4).toISOString());
     expect(request).not.toHaveProperty('relative');
-    expect(screen.getByLabelText('Applied time range').querySelector('time')).toHaveAttribute('datetime', range.from);
-    fireEvent.change(screen.getByLabelText('From', { exact: true }), { target: { value: '2026-11-04T03:00:00' } });
-    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(screen.getByLabelText("Выбранный период").querySelector('time')).toHaveAttribute('datetime', range.from);
+    fireEvent.change(screen.getByLabelText("С", { exact: true }), { target: { value: '2026-11-04T03:00:00' } });
+    await user.click(screen.getByRole('button', { name: "Следующая страница" }));
     await screen.findByText('message-100', { exact: true });
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'next-0' }));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.not.objectContaining({ from: expect.anything() }));
-    await user.click(screen.getByRole('button', { name: 'Search' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Start must be earlier than end.');
+    await user.click(screen.getByRole('button', { name: "Найти" }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Начало периода должно быть раньше окончания.');
     expect(searchLogs).toHaveBeenCalledTimes(3);
     expect(screen.getByText('message-100', { exact: true })).toBeInTheDocument();
-    await user.selectOptions(screen.getByLabelText('Time range'), '1h');
-    await user.selectOptions(screen.getByLabelText('Time range'), 'custom');
-    expect(screen.getByLabelText('From', { exact: true })).toHaveValue('2026-11-04T03:00:00');
-    await user.selectOptions(screen.getByLabelText('Time range'), '1h');
-    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await user.selectOptions(screen.getByLabelText("Период"), '1h');
+    await user.selectOptions(screen.getByLabelText("Период"), 'custom');
+    expect(screen.getByLabelText("С", { exact: true })).toHaveValue('2026-11-04T03:00:00');
+    await user.selectOptions(screen.getByLabelText("Период"), '1h');
+    await user.click(screen.getByRole('button', { name: "Найти" }));
     await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(4));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ relative: '1h' }));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.not.objectContaining({ from: expect.anything() }));
@@ -84,24 +87,25 @@ describe('existing search UI', () => {
   it('separates the all-streams view from the unmatched destination', async () => {
     const user = userEvent.setup(); render(<App />);
     await screen.findByText('message-0', { exact: true });
-    expect(screen.getByRole('option', { name: 'All messages' })).toHaveValue('all');
-    expect(screen.getByRole('option', { name: 'Unmatched messages' })).toHaveValue('@default');
-    await user.selectOptions(screen.getByLabelText('Stream', { exact: true }), '@default');
-    await user.click(screen.getByRole('button', { name: 'Search' }));
+    expect(screen.getByRole('option', { name: "Все сообщения" })).toHaveValue('all');
+    expect(screen.getByRole('option', { name: "Сообщения без совпавших правил" })).toHaveValue('@default');
+    await user.selectOptions(screen.getByLabelText("Поток", { exact: true }), '@default');
+    await user.click(screen.getByRole('button', { name: "Найти" }));
     await waitFor(() => expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ stream: '@default' })));
   });
   it('keeps PostgreSQL up and streams available when only OpenSearch is down', async () => {
-    vi.mocked(fetchHealth).mockResolvedValue({ status: 'degraded', postgres: true, opensearch: false, time: range.to });
+    vi.mocked(fetchHealth).mockResolvedValue({ status: 'degraded', postgres: true, redis: true, opensearch: false, time: range.to });
     render(<App />);
-    expect(await screen.findByText('postgres up')).toBeInTheDocument();
-    expect(screen.getByText('opensearch down')).toBeInTheDocument();
+    expect(await screen.findByText('postgres доступен')).toBeInTheDocument();
+    expect(screen.getByText('redis доступен')).toBeInTheDocument();
+    expect(screen.getByText('opensearch недоступен')).toBeInTheDocument();
     expect(await screen.findByRole('option', { name: 'Web access' })).toBeInTheDocument();
   });
 
   it('keeps metadata failures separate from search results', async () => {
     vi.mocked(fetchStreams).mockRejectedValue(new Error('Cannot load streams'));
     render(<App />);
-    expect(await screen.findByText('postgres up')).toBeInTheDocument();
+    expect(await screen.findByText('postgres доступен')).toBeInTheDocument();
     expect(await screen.findByText('Cannot load streams')).toBeInTheDocument();
     expect(await screen.findByText('message-0', { exact: true })).toBeInTheDocument();
   });
@@ -109,8 +113,8 @@ describe('existing search UI', () => {
   it('shows unknown service states on a transport error without discarding streams', async () => {
     vi.mocked(fetchHealth).mockRejectedValue(new Error('Network error'));
     render(<App />);
-    expect(await screen.findByText('postgres unknown')).toBeInTheDocument();
-    expect(screen.getByText('opensearch unknown')).toBeInTheDocument();
+    expect(await screen.findByText('postgres неизвестно')).toBeInTheDocument();
+    expect(screen.getByText('opensearch неизвестно')).toBeInTheDocument();
     expect(await screen.findByRole('option', { name: 'Web access' })).toBeInTheDocument();
   });
 
@@ -122,11 +126,11 @@ describe('existing search UI', () => {
     const input = screen.getByRole('textbox');
     await user.clear(input);
     await user.type(input, '(');
-    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await user.click(screen.getByRole('button', { name: "Найти" }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Invalid search query.');
     expect(screen.queryByText('message-0', { exact: true })).not.toBeInTheDocument();
-    expect(screen.getByText(/0 hits/)).toBeInTheDocument();
-    expect(screen.queryByText('No messages in this range.')).not.toBeInTheDocument();
+    expect(screen.getByText(/0 найдено/)).toBeInTheDocument();
+    expect(screen.queryByText("За выбранный период сообщений нет.")).not.toBeInTheDocument();
   });
 
   it('pages with the applied query and fixed range, then resets paging for a new search', async () => {
@@ -136,32 +140,32 @@ describe('existing search UI', () => {
     await screen.findByText('message-0', { exact: true });
     await user.clear(screen.getByRole('textbox'));
     await user.type(screen.getByRole('textbox'), 'level:warn');
-    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    await user.click(screen.getByRole('button', { name: "Следующая страница" }));
     expect(await screen.findByText('message-100', { exact: true })).toBeInTheDocument();
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'next-0' }));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.not.objectContaining({ relative: expect.anything() }));
-    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await user.click(screen.getByRole('button', { name: "Найти" }));
     await screen.findByText('message-0', { exact: true });
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ q: 'level:warn', relative: '24h', offset: 0 }));
     expect(closeSearchSession).toHaveBeenCalledWith('session');
-    expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: "Предыдущая страница" })).toBeDisabled();
+    expect(screen.getByRole('button', { name: "Следующая страница" })).toBeDisabled();
   });
 
   it('shows a lower-bound marker without an artificial browsing limit', async () => {
     vi.mocked(searchLogs).mockResolvedValue({ ...result(0, 12000), total_relation: 'gte' });
     render(<App />);
-    expect(await screen.findByText(/12000\+ hits/)).toBeInTheDocument();
+    expect(await screen.findByText(/12000\+ найдено/)).toBeInTheDocument();
     expect(screen.queryByText(/first 10000/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Next page' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: "Следующая страница" })).toBeEnabled();
   });
 
   it('continues browsing beyond the old 10000-result window', async () => {
     vi.mocked(searchLogs).mockResolvedValue(result(10000, 12000));
     render(<App />);
     expect(await screen.findByText('message-10000', { exact: true })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Next page' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Previous page' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: "Следующая страница" })).toBeEnabled();
+    expect(screen.getByRole('button', { name: "Предыдущая страница" })).toBeEnabled();
   });
 
   it('ignores an older search response that arrives after the latest search', async () => {
@@ -177,13 +181,13 @@ describe('existing search UI', () => {
 
   it('refreshes service states and stops polling after unmount', async () => {
     vi.useFakeTimers();
-    vi.mocked(fetchHealth).mockResolvedValueOnce({ status: 'degraded', postgres: true, opensearch: false, time: range.to })
-      .mockResolvedValue({ status: 'ok', postgres: true, opensearch: true, time: range.to });
+    vi.mocked(fetchHealth).mockResolvedValueOnce({ status: 'degraded', postgres: true, redis: true, opensearch: false, time: range.to })
+      .mockResolvedValue({ status: 'ok', postgres: true, redis: true, opensearch: true, time: range.to });
     let view!: ReturnType<typeof render>;
     await act(async () => { view = render(<App />); });
-    expect(screen.getByText('opensearch down')).toBeInTheDocument();
+    expect(screen.getByText('opensearch недоступен')).toBeInTheDocument();
     await act(async () => { vi.advanceTimersByTime(30000); });
-    expect(screen.getByText('opensearch up')).toBeInTheDocument();
+    expect(screen.getByText('opensearch доступен')).toBeInTheDocument();
     view.unmount();
     await act(async () => { vi.advanceTimersByTime(30000); });
     expect(fetchHealth).toHaveBeenCalledTimes(2);
@@ -203,7 +207,7 @@ describe('existing search UI', () => {
   it('shows an empty result without a request error', async () => {
     vi.mocked(searchLogs).mockResolvedValue(result(0, 0));
     render(<App />);
-    expect(await screen.findByText('No messages in this range.')).toBeInTheDocument();
+    expect(await screen.findByText("За выбранный период сообщений нет.")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 });

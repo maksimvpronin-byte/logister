@@ -17,7 +17,7 @@ function FieldRows({ nodes, depth = 0, filtered, onOpenMenu, activePath }: { nod
       <summary className="field-row" title={node.path}>
         <span className="field-key">{fieldLabel(node)}</span>
         <span className="field-type">{node.type}</span>
-        <span className="field-summary">{node.children.length} {node.type === "array" ? "items" : "fields"}</span>
+        <span className="field-summary">{node.children.length} {node.type === "array" ? "элементов" : "полей"}</span>
       </summary>
       <div className="field-children"><FieldRows nodes={node.children} depth={depth + 1} filtered={filtered} onOpenMenu={onOpenMenu} activePath={activePath} /></div>
     </details>
@@ -25,10 +25,10 @@ function FieldRows({ nodes, depth = 0, filtered, onOpenMenu, activePath }: { nod
     <span className="field-key">{fieldLabel(node)}</span>
     <span className="field-type">{node.type}</span>
     <div className="field-value-wrap"><span className={`field-value field-${node.type}`}>{node.text === "" ? '""' : node.text.replace(/\u0000/g, "\\u0000")}</span>
-      {onOpenMenu && <button type="button" className="field-action-button" aria-label={`Actions for field ${node.path}`} aria-haspopup="menu" aria-expanded={activePath === node.path} onClick={event => onOpenMenu(node, event.currentTarget)}><span aria-hidden="true">▾</span></button>}
+      {onOpenMenu && <button type="button" className="field-action-button" aria-label={`Действия с полем ${node.path}`} aria-haspopup="menu" aria-expanded={activePath === node.path} onClick={event => onOpenMenu(node, event.currentTarget)}><span aria-hidden="true">▾</span></button>}
     </div>
   </div>)}
-    {nodes.length > limit && <button className="more-fields" type="button" onClick={() => setLimit(limit + 200)}>Show more fields ({nodes.length - limit} remaining)</button>}
+    {nodes.length > limit && <button className="more-fields" type="button" onClick={() => setLimit(limit + 200)}>Показать ещё поля (осталось: {nodes.length - limit})</button>}
   </>;
 }
 
@@ -52,30 +52,31 @@ export default function MessageDetails({ message, onClose, onSearch }: { message
   }, [raw]);
   const nodes = useMemo(() => parsed ? filterMessageFields(parsed.root.children ?? [parsed.root], filter.trim().toLowerCase()) : [], [parsed, filter]);
   async function copy() {
-    try { await navigator.clipboard.writeText(raw); setCopyStatus("JSON copied"); }
-    catch { setCopyStatus("Could not copy. Select the text in the JSON tab to copy it."); }
+    try { await navigator.clipboard.writeText(raw); setCopyStatus("JSON скопирован"); }
+    catch { setCopyStatus("Не удалось скопировать. Выделите текст на вкладке JSON и скопируйте его вручную."); }
   }
-  return <section className="details message-details" aria-label="Message details">
+  return <section className="details message-details" aria-label="Подробности сообщения">
     <div className="message-details-header">
-      <div><strong>Message fields</strong><span className="message-stream">Stream <code>{message.stream}</code></span></div>
-      <div className="message-details-actions"><button type="button" onClick={copy}>Copy JSON</button><button type="button" aria-label="Close message details" onClick={onClose}>Close</button></div>
+      <div><strong>Поля сообщения</strong><span className="message-stream">Поток <code>{message.stream}</code>{message.host ? <> · хост {message.host}</> : null}</span></div>
+      <div className="message-details-actions"><button type="button" onClick={copy}>Скопировать JSON</button><button type="button" aria-label="Закрыть подробности сообщения" onClick={onClose}>Закрыть</button></div>
     </div>
+    {message.message ? <p className="message-lead">{message.message}</p> : null}
     <div className="message-details-toolbar">
-      <div role="tablist" aria-label="Message format" onKeyDown={event => {
+      <div role="tablist" aria-label="Формат сообщения" onKeyDown={event => {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault(); const next = tab === "fields" ? "json" : "fields"; setTab(next);
         document.getElementById(`${id}-${next}-tab`)?.focus();
       }}>
-        {(["fields", "json"] as const).map(value => <button type="button" role="tab" key={value} id={`${id}-${value}-tab`} aria-selected={tab === value} aria-controls={`${id}-${value}`} tabIndex={tab === value ? 0 : -1} onClick={() => { setTab(value); closeFieldMenu(); }}>{value === "fields" ? "Fields" : "JSON"}</button>)}
+        {(["fields", "json"] as const).map(value => <button type="button" role="tab" key={value} id={`${id}-${value}-tab`} aria-selected={tab === value} aria-controls={`${id}-${value}`} tabIndex={tab === value ? 0 : -1} onClick={() => { setTab(value); closeFieldMenu(); }}>{value === "fields" ? "Поля" : "JSON"}</button>)}
       </div>
-      {tab === "fields" && parsed && <input type="search" aria-label="Filter fields" placeholder="Find a field or value…" value={filter} onChange={event => setFilter(event.target.value)} />}
+      {tab === "fields" && parsed && <input type="search" aria-label="Фильтр полей" placeholder="Найти поле или значение…" value={filter} onChange={event => setFilter(event.target.value)} />}
       {copyStatus && <span className="copy-status" role="status">{copyStatus}</span>}
     </div>
     <div role="tabpanel" id={`${id}-fields`} aria-labelledby={`${id}-fields-tab`} hidden={tab !== "fields"}>
-      {!parsed ? <p className="fields-empty">This record is available in the JSON tab.</p> : <>
-        <div className="field-row field-heading" aria-hidden="true"><span>Field</span><span>Type</span><span>Value</span></div>
+      {!parsed ? <p className="fields-empty">Эта запись доступна на вкладке JSON.</p> : <>
+        <div className="field-row field-heading" aria-hidden="true"><span>Поле</span><span>Тип</span><span>Значение</span></div>
         {queryNotice && <p className="field-query-notice" role="status">{queryNotice}</p>}
-        <div className="fields-scroll">{nodes.length ? <FieldRows key={filter} nodes={nodes} filtered={Boolean(filter.trim())} onOpenMenu={onSearch ? openFieldMenu : undefined} activePath={fieldMenu?.node.path} /> : <p className="fields-empty">{filter ? "No matching fields." : "Empty JSON object."}</p>}</div>
+        <div className="fields-scroll">{nodes.length ? <FieldRows key={filter} nodes={nodes} filtered={Boolean(filter.trim())} onOpenMenu={onSearch ? openFieldMenu : undefined} activePath={fieldMenu?.node.path} /> : <p className="fields-empty">{filter ? "Подходящие поля не найдены." : "Пустой объект JSON."}</p>}</div>
       </>}
     </div>
     <div role="tabpanel" id={`${id}-json`} aria-labelledby={`${id}-json-tab`} hidden={tab !== "json"}>
@@ -85,7 +86,7 @@ export default function MessageDetails({ message, onClose, onSearch }: { message
       const search = fieldSearch(fieldMenu.node, message);
       if (!search.clause) return;
       onSearch?.(search.clause, exclude); closeFieldMenu();
-      setQueryNotice("Условие добавлено в строку поиска. Нажмите Search, чтобы применить.");
+      setQueryNotice("Условие добавлено в строку поиска. Нажмите «Найти», чтобы применить.");
     }} />}
   </section>;
 }

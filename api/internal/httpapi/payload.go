@@ -139,13 +139,18 @@ func indexableValue(value any, depth int) any {
 		return value
 	}
 }
+
+// searchExcerptBytes is the searchable and list preview. The complete input stays
+// in the unindexed payload, so a long log is not stored and analyzed twice.
+const searchExcerptBytes = 500
+
 func payloadMessage(req ingestRequest) string {
 	if strings.TrimSpace(req.Message) != "" {
-		return trimText(strings.TrimSpace(req.Message), 8000)
+		return trimText(strings.TrimSpace(req.Message), searchExcerptBytes)
 	}
 	if req.Payload != nil {
 		raw, _ := json.Marshal(req.Payload)
-		return trimText(string(raw), 2000)
+		return trimText(string(raw), searchExcerptBytes)
 	}
 	return ""
 }

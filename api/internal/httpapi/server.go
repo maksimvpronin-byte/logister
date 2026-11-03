@@ -17,17 +17,41 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/logister/logister/api/internal/authz"
 	"github.com/logister/logister/api/internal/config"
 	"github.com/logister/logister/api/internal/db"
+	"github.com/logister/logister/api/internal/kafkainput"
 	"github.com/logister/logister/api/internal/search"
 )
 
 type Server struct {
+	kafka   *kafkainput.Consumer
 	cfg     config.Config
 	pool    *pgxpool.Pool
 	search  *search.Client
 	store   batchAcceptor
 	catalog streamCatalog
+	auth    *authentication
+	metrics ingestStatsReader
+	intake  intakeJournal
+}
+
+type intakeJournal interface {
+	Pending(context.Context, string) (int64, error)
+	Ping(context.Context) error
+	ActiveAccepted(context.Context, string, string) (string, int64, bool)
+	NoteRotation(context.Context, string, string, string) (bool, error)
+	TargetPending(context.Context, string, string) (int64, error)
+}
+
+func (s *Server) UseJournal(journal interface {
+	batchAcceptor
+	ingestStatsReader
+	intakeJournal
+}) {
+	s.store = journal
+	s.metrics = journal
+	s.intake = journal
 }
 
 type batchAcceptor interface {
@@ -38,6 +62,7 @@ func NewServer(cfg config.Config, pool *pgxpool.Pool, searchClient *search.Clien
 	server := &Server{cfg: cfg, pool: pool, search: searchClient, store: db.NewIngestStore(pool)}
 	if pool != nil {
 		server.catalog = db.NewStreamStore(pool)
+		server.metrics = db.NewIngestStatsStore(pool)
 	}
 	return server
 }
@@ -45,24 +70,41 @@ func NewServer(cfg config.Config, pool *pgxpool.Pool, searchClient *search.Clien
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) { writeError(w, 404, "No session.") })
+	mux.HandleFunc("GET /api/auth/me", s.handleMe)
+	mux.HandleFunc("GET /api/auth/directory", s.require(authz.SystemGrants, s.handleDirectory))
+	mux.HandleFunc("GET /api/auth/grants", s.require(authz.SystemGrants, s.handleGrants))
+	mux.HandleFunc("PUT /api/auth/grants", s.require(authz.SystemGrants, s.handleGrants))
+	mux.HandleFunc("GET /api/auth/ldap", s.require(authz.SystemGrants, s.handleLDAPSettings))
+	mux.HandleFunc("PUT /api/auth/ldap", s.require(authz.SystemGrants, s.handleLDAPSettings))
+	mux.HandleFunc("POST /api/auth/ldap/test", s.require(authz.SystemGrants, s.handleLDAPSettings))
 	mux.HandleFunc("GET /api/streams", s.handleStreams)
-	mux.HandleFunc("POST /api/streams", s.handleSaveStream)
-	mux.HandleFunc("POST /api/streams/preview-routing", s.handleRoutingPreview)
-	mux.HandleFunc("PUT /api/streams/{name}", s.handleSaveStream)
-	mux.HandleFunc("GET /api/streams/{name}/indices", s.handleStreamIndices)
-	mux.HandleFunc("POST /api/streams/{name}/rotate", s.handleRotateStream)
+	mux.HandleFunc("GET /api/ingest/kafka", s.require(authz.SystemGrants, s.handleKafka))
+	mux.HandleFunc("PUT /api/ingest/kafka", s.require(authz.SystemGrants, s.handleKafka))
+	mux.HandleFunc("GET /api/ingest/stats", s.handleIngestStats)
+	mux.HandleFunc("GET /api/streams/deleted", s.require(authz.StreamsDelete, s.handleArchivedStreams))
+	mux.HandleFunc("DELETE /api/streams/{name}", s.require(authz.StreamsDelete, s.handleDeleteStream))
+	mux.HandleFunc("POST /api/streams/{name}/restore", s.require(authz.StreamsDelete, s.handleDeleteStream))
+	mux.HandleFunc("POST /api/streams", s.require(authz.StreamsCreate, s.handleSaveStream))
+	mux.HandleFunc("POST /api/streams/preview-routing", s.require(authz.StreamsEdit, s.handleRoutingPreview))
+	mux.HandleFunc("PUT /api/streams/{name}", s.require(authz.StreamsEdit, s.handleSaveStream))
+	mux.HandleFunc("GET /api/streams/{name}/indices", s.require(authz.StreamsEdit, s.handleStreamIndices))
+	mux.HandleFunc("POST /api/streams/{name}/rotate", s.require(authz.StreamsRotate, s.handleRotateStream))
 	mux.HandleFunc("POST /api/streams/{name}/ingest", s.handleIngestJSON)
-	mux.HandleFunc("GET /api/inputs", s.handleInputs)
+	mux.HandleFunc("GET /api/inputs", s.require(authz.InputsRead, s.handleInputs))
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("DELETE /api/search/session", s.handleCloseSearch)
 	mux.HandleFunc("POST /api/ingest/json", s.handleIngestJSON)
 	mux.HandleFunc("POST /api/ingest/fluent-bit", func(w http.ResponseWriter, r *http.Request) { s.handleIngest(w, r, 16<<20, 10000) })
-	return withCORS(s.cfg.CORSOrigin, mux)
+	return withCORS(s.cfg.CORSOrigin, s.authenticate(mux))
 }
 
 func withCORS(origin string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
 		if r.Method == http.MethodOptions {
@@ -109,19 +151,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pgOK := db.Ping(ctx, s.pool) == nil
 	osOK := s.search.Ready(ctx, s.readIndex()) == nil
+	redisOK := s.intake == nil || s.intake.Ping(ctx) == nil
 	var pending any
-	if pgOK && s.pool != nil {
+	if s.intake != nil && redisOK {
+		if count, err := s.intake.Pending(ctx, s.cfg.OpenSearchIndex); err == nil {
+			pending = count
+		}
+	} else if pgOK && s.pool != nil && s.intake == nil {
 		if count, err := db.NewIngestStore(s.pool).Pending(ctx, s.cfg.OpenSearchIndex); err == nil {
 			pending = count
 		}
 	}
+	ready := pgOK && osOK && redisOK
 	status := http.StatusOK
-	if !pgOK || !osOK {
+	if !ready {
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(w, status, map[string]any{
-		"status":           map[bool]string{true: "ok", false: "degraded"}[pgOK && osOK],
+		"status":           map[bool]string{true: "ok", false: "degraded"}[ready],
 		"postgres":         pgOK,
+		"redis":            redisOK,
 		"opensearch":       osOK,
 		"time":             time.Now().UTC(),
 		"pending_messages": pending,
@@ -139,6 +188,16 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 	if streams == nil {
 		streams = []db.Stream{}
 	}
+	if s.cfg.AuthEnabled {
+		info := r.Context().Value(authContextKey{}).(requestIdentity)
+		filtered := []db.Stream{}
+		for _, stream := range streams {
+			if info.access.Allowed(authz.StreamsRead, stream.ID) {
+				filtered = append(filtered, stream)
+			}
+		}
+		streams = filtered
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"streams": streams})
 }
 
@@ -155,6 +214,11 @@ func (s *Server) handleInputs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	var permitted bool
+	r, permitted = s.allowedSearch(w, r)
+	if !permitted {
+		return
+	}
 	q := r.URL.Query()
 	if q.Has("cursor") {
 		if len(q) != 1 || q.Get("cursor") == "" {
@@ -258,6 +322,11 @@ func (s *Server) searchError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleCloseSearch(w http.ResponseWriter, r *http.Request) {
+	var permitted bool
+	r, permitted = s.allowedSearch(w, r)
+	if !permitted {
+		return
+	}
 	var body struct {
 		SessionID string `json:"session_id"`
 	}
@@ -284,10 +353,11 @@ type ingestRequest struct {
 	Timestamp  *time.Time     `json:"timestamp"`
 	Fields     map[string]any `json:"fields"`
 	// Fluent Bit tail without parser keeps the line here.
-	Log          string         `json:"log"`
-	Payload      map[string]any `json:"-"`
-	Lookup       map[string]any `json:"-"`
-	ForcedStream string         `json:"-"`
+	Log            string         `json:"log"`
+	Payload        map[string]any `json:"-"`
+	Lookup         map[string]any `json:"-"`
+	ForcedStream   string         `json:"-"`
+	KafkaTransport bool           `json:"-"`
 }
 
 func unwrapIngest(req ingestRequest) ingestRequest {
@@ -307,6 +377,7 @@ func unwrapIngest(req ingestRequest) ingestRequest {
 			for key, value := range nested.Payload {
 				lookup[key] = value
 			}
+			nested.KafkaTransport = req.KafkaTransport
 			nested.Lookup = lookup
 			nested.Payload = req.Payload
 			req = nested
@@ -433,80 +504,23 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request, limit int6
 		writeError(w, http.StatusBadRequest, "Idempotency-Key must not exceed 200 bytes")
 		return
 	}
-	events := make([]db.Event, len(batch))
-	var streams []db.Stream
-	if s.catalog != nil {
-		streams, err = s.catalog.List(r.Context())
-		if err != nil {
-			writeJSON(w, 503, map[string]any{"error": "Stream settings are unavailable. Retry with the same event IDs.", "count": 0})
-			return
-		}
-	}
-
-	// Validate every item before writing anything. A client must be able to
-	// correct and retry a malformed batch without duplicating a valid prefix.
-	for i, item := range batch {
-		item = unwrapIngest(item)
-		if target := r.PathValue("name"); target != "" {
-			if item.Stream != "" && item.Stream != target {
-				writeError(w, 400, "Message stream conflicts with the destination URL.")
-				return
-			}
-			item.Stream = target
-			item.ForcedStream = target
-		}
-		canonical := canonicalPayload(item)
-		req, err := normalizeIngest(item, r.RemoteAddr)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if s.catalog != nil {
-			req.Stream = item.Stream
-			req, err = routeIngest(req, streams)
-			if err != nil {
-				writeError(w, 400, err.Error())
-				return
-			}
-		}
-		id := req.ID
-		if id == "" {
-			id = req.DeliveryID
-		}
-		if len(id) > 256 {
-			writeError(w, http.StatusBadRequest, "event id must not exceed 256 bytes")
-			return
-		}
-		if id == "" && key != "" {
-			id = "batch:" + key + ":" + strconv.Itoa(i)
-		}
-		if id == "" {
-			id, err = randomIdentity()
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "cannot allocate event identity")
-				return
-			}
-		}
-		id = digest([]byte(s.cfg.OpenSearchIndex + "\x00" + id))
-		events[i] = db.Event{ID: id, Hash: digest(canonical), Document: ingestDocument(req, id)}
-		events[i].HashVersion = 2
-		events[i].LegacyHash = legacyPayloadHash(item)
-		if s.catalog != nil {
-			events[i].StreamName = req.Stream
-		}
+	var access *authz.Access
+	if s.cfg.AuthEnabled && !isFluentBitIngest(r) {
+		info := r.Context().Value(authContextKey{}).(requestIdentity)
+		access = &info.access
 	}
 	batchBody := body
 	if target := r.PathValue("name"); target != "" {
 		batchBody = append(append([]byte(target+"\x00"), body...), byte(0))
 	}
-	receipt, err := s.store.Accept(r.Context(), s.cfg.OpenSearchIndex, key, digest(batchBody), events)
+	receipt, err := s.acceptIngest(r.Context(), batch, key, digest(batchBody), r.RemoteAddr, r.PathValue("name"), access)
 	if err != nil {
-		if errors.Is(err, db.ErrIdentityConflict) {
-			writeError(w, http.StatusConflict, "Event ID or Idempotency-Key was reused with different data.")
-			return
+		var problem *ingestFailure
+		if errors.As(err, &problem) {
+			writeJSON(w, problem.Status, map[string]any{"error": problem.Message, "count": 0})
+		} else {
+			writeError(w, 503, "Ingestion storage is unavailable.")
 		}
-		log.Printf("durable ingest rejected: %v", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "Ingestion storage is unavailable. Retry with the same event IDs or Idempotency-Key.", "count": 0})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "count": receipt.Count, "duplicates": receipt.Duplicates})

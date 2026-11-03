@@ -42,12 +42,13 @@ cd ui && npm install && npm run dev -- --host 127.0.0.1 --port 3000
 - **API** — http://127.0.0.1:8080
 - **OpenSearch** — http://127.0.0.1:9200
 - **Postgres** — `127.0.0.1:5432` (`logister` / `logister` / `logister`)
+- **Redis** — `127.0.0.1:6379` (intake journal, AOF every second)
 
 Sample messages are seeded on first API start (optional).
 
 ### Live log pipeline (Fluent Bit)
 
-Synthetic app logs → file → supervised Fluent Bit → durable PostgreSQL queue → OpenSearch:
+Synthetic app logs → file → supervised Fluent Bit → Kafka → Redis journal → OpenSearch:
 
 ```bash
 # build the custom generator and supervised sender first
@@ -59,8 +60,9 @@ INGEST_HOST=host.docker.internal docker compose -f docker-compose.pipeline.yml u
 ```
 
 `loggen` writes JSON lines with stable event IDs every ~700ms and retains rotated
-files; Fluent Bit ships them to `/api/ingest/fluent-bit`. HTTP 202 confirms an
-atomic PostgreSQL commit. OpenSearch indexing follows asynchronously.
+files; Fluent Bit ships them through Kafka. HTTP 202 confirms the Redis journal
+accepted the batch. OpenSearch indexing follows asynchronously. PostgreSQL keeps
+stream settings and index generations.
 
 Fluent Bit keeps its read offsets and pending deliveries in the
 `fluent_bit_state` Docker volume. Keep this volume when recreating the shipper.
@@ -108,8 +110,8 @@ new API or UI instance, stop the existing instance using the same port.
 
 Vertical slice only:
 
-- ingest sample / HTTP JSON through a durable PostgreSQL queue into OpenSearch
-- Postgres for metadata, atomic intake and retry identities
+- ingest sample / HTTP JSON through the Redis journal into OpenSearch
+- Postgres for stream settings, access and index generations; Redis for intake and retry identities
 - React UI with time-range search and Lucene-like query
 
 ## Stack
@@ -119,8 +121,18 @@ Vertical slice only:
 | API | Go |
 | UI | React + TypeScript + Vite |
 | Logs | OpenSearch |
-| Metadata | PostgreSQL |
+| Intake journal | Redis |
+| Settings | PostgreSQL |
+
+## Access model
+
+LDAP sign-in, users/groups, stream scopes and role mappings are documented in
+[docs/roles.md](docs/roles.md). Run `sh deploy/start-ldap-auth.sh` to use the local
+LDAP lab with API authorization and the Users & roles screen. The root Compose
+file alone keeps development mode without sign-in.
 
 ## License
 
 Apache 2.0
+
+Настройка буфера и нагрузочное тестирование: [Kafka между Fluent Bit и Logister](docs/kafka.md).

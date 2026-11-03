@@ -1,0 +1,44 @@
+name: logister-ldap
+services:
+  ldap:
+    build: .
+    restart: unless-stopped
+    environment:
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:?Copy .env.example to .env}
+      LDAP_READER_PASSWORD: ${LDAP_READER_PASSWORD:?Copy .env.example to .env}
+      LDAP_TEST_PASSWORD: ${LDAP_TEST_PASSWORD:?Copy .env.example to .env}
+    ports:
+      - "127.0.0.1:${LDAP_PORT:-1389}:389"
+    volumes:
+      - ldap_data:/var/lib/ldap
+    healthcheck:
+      test: [CMD-SHELL, 'ldapwhoami -x -H ldap://127.0.0.1 -D "cn=admin,dc=logister,dc=test" -w "$$LDAP_ADMIN_PASSWORD" >/dev/null']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  manager:
+    image: ghcr.io/ldapaccountmanager/lam:stable@sha256:ce7fa36fe6b2afc1a6e2423567c806c13bd4578e13c3869aa9e6557c065c7be0
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/logister/manager-entrypoint.sh"]
+    volumes:
+      - lam_config:/var/lib/ldap-account-manager/config
+      - ./lam.conf:/opt/logister/lam.conf:ro
+      - ./manager-entrypoint.sh:/opt/logister/manager-entrypoint.sh:ro
+    environment:
+      LAM_SKIP_PRECONFIGURE: "false"
+      LAM_PASSWORD: ${LDAP_ADMIN_PASSWORD}
+      LDAP_DOMAIN: logister.test
+      LDAP_BASE_DN: dc=logister,dc=test
+      LDAP_USERS_DN: ou=people,dc=logister,dc=test
+      LDAP_GROUPS_DN: ou=groups,dc=logister,dc=test
+      LDAP_SERVER: ldap://ldap:389
+      LDAP_USER: cn=admin,dc=logister,dc=test
+      LAM_LANG: en_US
+    ports:
+      - "127.0.0.1:${LDAP_UI_PORT:-8088}:80"
+    depends_on:
+      ldap:
+        condition: service_healthy
+volumes:
+  ldap_data:
+  lam_config:

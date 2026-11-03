@@ -1,8 +1,47 @@
+import { apiError } from "./locale";
+
+async function requestFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  try { return await fetch(input, init); }
+  catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    throw new Error("Не удалось связаться с сервером. Проверьте подключение и повторите попытку.");
+  }
+}
+
 const API_URL = import.meta.env.VITE_API_URL || "";
+
+export type Identity = { enabled: boolean; username: string; user_id: string; administrator: boolean; permissions: string[]; access_version?: string };
+export type DirectoryEntry = { id: string; kind: "user" | "group"; name: string; dn: string };
+export type Grant = { principal_kind: "user" | "group"; principal_id: string; role: "operator" | "service" | "administrator"; scope: "system" | "stream"; stream_id?: string };
+export type GrantCatalog = { grants: Grant[]; revision: number };
+
+function sessionExpired(status: number) { if (status === 401) window.dispatchEvent(new Event("logister:session-expired")); }
+export const authStatus = () => getJSON<{ enabled: boolean }>("/api/auth/status");
+export const fetchIdentity = () => getJSON<Identity>("/api/auth/me");
+export const login = (username: string, password: string, source: string) => writeJSON<{ username: string }>("/api/auth/login", "POST", { username, password, source });
+export const logout = async () => {
+  const res = await requestFetch(`${API_URL}/api/auth/logout`, { method: "POST", credentials: "include" });
+  if (!res.ok && res.status !== 401) throw new Error("Не удалось выйти. Повторите попытку.");
+};
+export const fetchDirectory = (query = "") => getJSON<{ entries: DirectoryEntry[] }>(`/api/auth/directory?q=${encodeURIComponent(query)}`);
+export const fetchGrants = () => getJSON<GrantCatalog>("/api/auth/grants");
+export const saveGrants = (catalog: GrantCatalog) => writeJSON("/api/auth/grants", "PUT", catalog);
+
+export type LDAPSettings = { url: string; bind_dn: string; users_dn: string; groups_dn: string; password_set: boolean; revision: number };
+export type LDAPSettingsDraft = Omit<LDAPSettings, "password_set"> & { bind_password?: string };
+export type LDAPCheck = { users_found: boolean; groups_found: boolean };
+export const fetchLDAPSettings = () => getJSON<LDAPSettings>("/api/auth/ldap");
+export const testLDAPSettings = (draft: LDAPSettingsDraft) => writeJSON<LDAPCheck>("/api/auth/ldap/test", "POST", draft);
+export const saveLDAPSettings = (draft: LDAPSettingsDraft) => writeJSON<LDAPSettings>("/api/auth/ldap", "PUT", draft);
+
+export type IngestCounts = { accepted: number; published: number; pending: number };
+export type IngestStats = { captured_at: string; totals: IngestCounts; streams: (IngestCounts & { id: string; name: string; title: string })[] };
+export const fetchIngestStats = (signal?: AbortSignal) => getJSON<IngestStats>("/api/ingest/stats", signal);
 
 export type Health = {
   status: string;
   postgres: boolean;
+  redis?: boolean;
   opensearch: boolean;
   time: string;
 };
@@ -27,9 +66,9 @@ export type StreamDraft = Omit<Stream, "id" | "routing" | "storage"> & { routing
 export type StreamIndex = { name: string; generation: number; created_at: string; sealed_at: string | null; deleted_at: string | null; accepted_count: number; documents?: number; size_bytes?: number; stats_error?: string; preparing?: boolean };
 
 async function writeJSON<T>(path: string, method: string, body?: unknown): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const response = await requestFetch(`${API_URL}${path}`, { method, credentials: "include", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) { sessionExpired(response.status); throw apiError(data.error, response.status); }
   return data;
 }
 
@@ -75,10 +114,11 @@ export type SearchResult = {
 };
 
 async function getJSON<T>(path: string, signal?: AbortSignal, acceptedStatus?: number): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, { signal });
+  const res = await requestFetch(`${API_URL}${path}`, { signal, credentials: "include" });
   if (!res.ok && res.status !== acceptedStatus) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    sessionExpired(res.status);
+    throw apiError(body.error, res.status);
   }
   return res.json();
 }
@@ -86,7 +126,7 @@ async function getJSON<T>(path: string, signal?: AbortSignal, acceptedStatus?: n
 export async function fetchHealth(signal?: AbortSignal) {
   const health = await getJSON<Health>("/api/health", signal, 503);
   if (!health || typeof health.postgres !== "boolean" || typeof health.opensearch !== "boolean") {
-    throw new Error("Service status is unavailable");
+    throw new Error("Состояние сервисов недоступно");
   }
   return health;
 }
@@ -121,5 +161,12 @@ export function searchLogs(params: {
 
 export async function closeSearchSession(session_id: string) {
   if (!session_id) return;
-  await fetch(`${API_URL}/api/search/session`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id }), keepalive: true });
+  await requestFetch(`${API_URL}/api/search/session`, { method: "DELETE", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id }), keepalive: true });
 }
+
+export const deleteStream = (name: string) => writeJSON<{deleted:boolean}>(`/api/streams/${encodeURIComponent(name)}`, "DELETE", {});
+export const restoreStream = (name: string) => writeJSON<{deleted:boolean}>(`/api/streams/${encodeURIComponent(name)}/restore`, "POST", {});
+export const fetchDeletedStreams = () => getJSON<{streams:Stream[]}>("/api/streams/deleted");
+export type KafkaStatus={enabled:boolean;topic:string;group:string;pause_requested:boolean;running:boolean;available:number;committed:number;lag:number;error?:string;retention_loss:boolean;captured_at:string};
+export const fetchKafkaStatus=(signal?:AbortSignal)=>getJSON<KafkaStatus>("/api/ingest/kafka",signal);
+export const setKafkaPaused=(paused:boolean)=>writeJSON<KafkaStatus>("/api/ingest/kafka","PUT",{paused});
