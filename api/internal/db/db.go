@@ -36,10 +36,12 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 }
 
 type Stream struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	Routing     RoutingConfig `json:"routing"`
+	Storage     StorageConfig `json:"storage"`
 }
 
 type Input struct {
@@ -50,21 +52,7 @@ type Input struct {
 }
 
 func ListStreams(ctx context.Context, pool *pgxpool.Pool) ([]Stream, error) {
-	rows, err := pool.Query(ctx, `SELECT id::text, name, title, description FROM streams ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Stream
-	for rows.Next() {
-		var s Stream
-		if err := rows.Scan(&s.ID, &s.Name, &s.Title, &s.Description); err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
+	return NewStreamStore(pool).List(ctx)
 }
 
 func ListInputs(ctx context.Context, pool *pgxpool.Pool) ([]Input, error) {

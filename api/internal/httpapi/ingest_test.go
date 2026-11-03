@@ -87,7 +87,7 @@ func ingestCall(t *testing.T, handler http.Handler, payload []byte, chunked bool
 
 func TestIngestRejectsWholeInvalidBatch(t *testing.T) {
 	handler, store := ingestHandler(t, 0)
-	payload := []byte(`[{"message":"valid first message"},{"source":"missing-message"}]`)
+	payload := []byte(`[{"message":"valid first message"},null]`)
 	for attempt := 0; attempt < 2; attempt++ {
 		recorder, _ := ingestCall(t, handler, payload, false)
 		if recorder.Code != http.StatusBadRequest {

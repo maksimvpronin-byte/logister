@@ -22,11 +22,19 @@ CREATE TABLE IF NOT EXISTS ingest_events (
  published_at timestamptz, PRIMARY KEY(index_name,event_id)
 );
 CREATE INDEX IF NOT EXISTS ingest_pending ON ingest_events(created_at) WHERE published_at IS NULL;
+ALTER TABLE ingest_events ADD COLUMN IF NOT EXISTS target_index text NOT NULL DEFAULT '';
+ALTER TABLE ingest_events ALTER COLUMN document DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS ingest_target_pending ON ingest_events(target_index) WHERE published_at IS NULL;
+ALTER TABLE ingest_events ADD COLUMN IF NOT EXISTS hash_version smallint NOT NULL DEFAULT 1;
 `
 
 type Event struct {
-	ID, Hash string
-	Document json.RawMessage
+	ID, Hash    string
+	Document    json.RawMessage
+	StreamName  string
+	TargetIndex string
+	HashVersion int
+	LegacyHash  string
 }
 type Receipt struct {
 	Count      int `json:"count"`
@@ -66,20 +74,36 @@ func (s *IngestStore) Accept(ctx context.Context, index, key, hash string, event
 			return Receipt{Count: count, Duplicates: count}, tx.Commit(ctx)
 		}
 	}
+	if err := lockEventStreams(ctx, tx, events); err != nil {
+		return Receipt{}, err
+	}
 	for _, event := range events {
-		tag, err := tx.Exec(ctx, `INSERT INTO ingest_events(index_name,event_id,payload_hash,document) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, index, event.ID, event.Hash, event.Document)
+		version := event.HashVersion
+		if version == 0 {
+			version = 1
+		}
+		tag, err := tx.Exec(ctx, `INSERT INTO ingest_events(index_name,event_id,payload_hash,document,hash_version) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, index, event.ID, event.Hash, event.Document, version)
 		if err != nil {
 			return Receipt{}, err
 		}
 		if tag.RowsAffected() == 0 {
 			var previous string
-			if err := tx.QueryRow(ctx, `SELECT payload_hash FROM ingest_events WHERE index_name=$1 AND event_id=$2`, index, event.ID).Scan(&previous); err != nil {
+			var previousVersion int
+			if err := tx.QueryRow(ctx, `SELECT payload_hash,hash_version FROM ingest_events WHERE index_name=$1 AND event_id=$2`, index, event.ID).Scan(&previous, &previousVersion); err != nil {
 				return Receipt{}, err
 			}
-			if previous != event.Hash {
+			if previous != event.Hash && !(previousVersion == 1 && event.LegacyHash != "" && previous == event.LegacyHash) {
 				return Receipt{}, ErrIdentityConflict
 			}
 			receipt.Duplicates++
+		} else if event.StreamName != "" {
+			target, err := assignStreamIndex(ctx, tx, index, event.StreamName)
+			if err != nil {
+				return Receipt{}, err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE ingest_events SET target_index=$3 WHERE index_name=$1 AND event_id=$2`, index, event.ID, target); err != nil {
+				return Receipt{}, err
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -96,14 +120,14 @@ func (s *IngestStore) Publish(ctx context.Context, index string, write func([]Ev
 		return 0, err
 	}
 	defer tx.Rollback(context.Background())
-	rows, err := tx.Query(ctx, `SELECT event_id,document FROM ingest_events WHERE index_name=$1 AND published_at IS NULL ORDER BY created_at,event_id LIMIT 200 FOR UPDATE SKIP LOCKED`, index)
+	rows, err := tx.Query(ctx, `SELECT event_id,document,target_index FROM ingest_events WHERE index_name=$1 AND published_at IS NULL ORDER BY created_at,event_id LIMIT 200 FOR UPDATE SKIP LOCKED`, index)
 	if err != nil {
 		return 0, err
 	}
 	var events []Event
 	for rows.Next() {
 		var event Event
-		if err := rows.Scan(&event.ID, &event.Document); err != nil {
+		if err := rows.Scan(&event.ID, &event.Document, &event.TargetIndex); err != nil {
 			rows.Close()
 			return 0, err
 		}

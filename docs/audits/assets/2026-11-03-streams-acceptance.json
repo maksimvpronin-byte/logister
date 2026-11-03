@@ -1,0 +1,187 @@
+[
+  {
+    "test": "generated_pipeline",
+    "seconds": 1.692,
+    "passed": true,
+    "records": 300,
+    "rotations": 6
+  },
+  {
+    "test": "mixed_types",
+    "seconds": 0.972,
+    "passed": true,
+    "types": 6
+  },
+  {
+    "test": "legacy_migration",
+    "seconds": 2.973,
+    "passed": true,
+    "migrated_records": 200,
+    "original_backup_records": 200,
+    "new_mixed_records": 2
+  },
+  {
+    "test": "deep_snapshot",
+    "seconds": 11.038,
+    "passed": true,
+    "snapshot_records": 10050,
+    "last_offset": 10000,
+    "late_records_excluded": 1
+  },
+  {
+    "test": "lost_acknowledgement",
+    "seconds": 0.532,
+    "passed": true,
+    "acknowledged_records": 10,
+    "concurrent_retries": 8,
+    "duplicates_in_index": 0
+  },
+  {
+    "test": "load",
+    "seconds": 5.152,
+    "passed": true,
+    "records": 5000,
+    "workers": 8,
+    "accept_p95_ms": 750,
+    "end_to_end_seconds": 5.149
+  },
+  {
+    "test": "os_and_api_crash",
+    "seconds": 14.686,
+    "passed": true,
+    "accepted_while_search_offline": 400,
+    "duplicates_after_restart": 0
+  },
+  {
+    "test": "postgres_crash",
+    "seconds": 4.033,
+    "passed": true,
+    "previously_acknowledged": 100,
+    "retried_after_recovery": 50
+  },
+  {
+    "test": "shipper_crash",
+    "seconds": 10.476,
+    "passed": true,
+    "queued_records_survived_SIGKILL": 200,
+    "logical_duplicates_after_checkpoint_reset": 0
+  },
+  {
+    "test": "rotation",
+    "seconds": 7.367,
+    "passed": true,
+    "records": 600,
+    "rename_and_create": true,
+    "quiesced_copytruncate": true
+  },
+  {
+    "test": "shipper_burst",
+    "seconds": 7.062,
+    "passed": true,
+    "records": 5000
+  },
+  {
+    "test": "postgres_disk_full",
+    "seconds": 2.775,
+    "passed": true,
+    "atomic_rejection_on_ENOSPC": true,
+    "recovered_records": 200,
+    "host_disk_filled": false
+  },
+  {
+    "test": "source_disk_full",
+    "seconds": 9.147,
+    "passed": true,
+    "valid_source_records_after_ENOSPC": 300,
+    "unique_ids": 300
+  },
+  {
+    "test": "shipper_disk_full",
+    "seconds": 20.617,
+    "passed": true,
+    "source": "shipper-disk-c73c25ed",
+    "records_after_shipper_ENOSPC": 100,
+    "automatic_recovery_after_freeing_space": true
+  },
+  {
+    "test": "ui_proxy_recovery",
+    "seconds": 2.376,
+    "passed": true,
+    "UI_recovers_after_API_address_change": true,
+    "preserved_records": 22617
+  },
+  {
+    "test": "stream_routing",
+    "seconds": 1.616,
+    "passed": true,
+    "priority_and_explicit_destination": true,
+    "unknown_stream_batch_atomic": true,
+    "rule_changes_preserve_retry_destination": true
+  },
+  {
+    "test": "stream_rollover_and_retry",
+    "seconds": 3.608,
+    "passed": true,
+    "generation_counts": [
+      2,
+      2,
+      1
+    ],
+    "duplicates_after_rollover": 0,
+    "snapshot_survives_rollover": true
+  },
+  {
+    "test": "stream_age_rotation",
+    "seconds": 5.797,
+    "passed": true,
+    "age_threshold_hours": 1,
+    "quiet_stream_rotated": true,
+    "empty_successor_avoided": true
+  },
+  {
+    "test": "stream_size_rotation",
+    "seconds": 9.929,
+    "passed": true,
+    "threshold_bytes": 1048576,
+    "observed_primary_bytes": 7678767,
+    "size_rotation": true
+  },
+  {
+    "test": "stream_retention",
+    "seconds": 9.051,
+    "passed": true,
+    "expired_index_deleted": true,
+    "active_index_preserved": true,
+    "published_payload_cleared": true,
+    "retry_does_not_resurrect": true
+  },
+  {
+    "test": "stream_pending_retention",
+    "seconds": 29.543,
+    "passed": true,
+    "pending_event_protected_during_outage": true,
+    "deletion_waits_for_publication": true
+  },
+  {
+    "test": "stream_settings_restart",
+    "seconds": 1.019,
+    "passed": true,
+    "settings_persist_after_restart": true,
+    "duplicate_name_rejected": true
+  },
+  {
+    "test": "stream_search_errors",
+    "seconds": 0.089,
+    "passed": true,
+    "invalid_query_across_multiple_indices": 400,
+    "invalid_parameters": 400
+  },
+  {
+    "test": "reconcile",
+    "seconds": 1.614,
+    "passed": true,
+    "durable_records": 22695,
+    "indexed_records": 22695,
+    "pending": 0
+  }
+]

@@ -1,0 +1,222 @@
+[
+  {
+    "test": "generated_pipeline",
+    "seconds": 2.272,
+    "passed": true,
+    "records": 300,
+    "rotations": 6,
+    "stream_rules_applied_by_API": true
+  },
+  {
+    "test": "mixed_types",
+    "seconds": 0.355,
+    "passed": true,
+    "types": 6
+  },
+  {
+    "test": "legacy_migration",
+    "seconds": 2.917,
+    "passed": true,
+    "migrated_records": 200,
+    "original_backup_records": 200,
+    "new_mixed_records": 2
+  },
+  {
+    "test": "deep_snapshot",
+    "seconds": 11.304,
+    "passed": true,
+    "snapshot_records": 10050,
+    "last_offset": 10000,
+    "late_records_excluded": 1
+  },
+  {
+    "test": "lost_acknowledgement",
+    "seconds": 1.146,
+    "passed": true,
+    "acknowledged_records": 10,
+    "concurrent_retries": 8,
+    "duplicates_in_index": 0
+  },
+  {
+    "test": "load",
+    "seconds": 4.197,
+    "passed": true,
+    "records": 5000,
+    "workers": 8,
+    "accept_p95_ms": 643,
+    "end_to_end_seconds": 4.193
+  },
+  {
+    "test": "os_and_api_crash",
+    "seconds": 14.142,
+    "passed": true,
+    "accepted_while_search_offline": 400,
+    "duplicates_after_restart": 0
+  },
+  {
+    "test": "postgres_crash",
+    "seconds": 4.298,
+    "passed": true,
+    "previously_acknowledged": 100,
+    "retried_after_recovery": 50
+  },
+  {
+    "test": "shipper_crash",
+    "seconds": 10.609,
+    "passed": true,
+    "queued_records_survived_SIGKILL": 200,
+    "logical_duplicates_after_checkpoint_reset": 0
+  },
+  {
+    "test": "rotation",
+    "seconds": 7.271,
+    "passed": true,
+    "records": 600,
+    "rename_and_create": true,
+    "quiesced_copytruncate": true
+  },
+  {
+    "test": "shipper_burst",
+    "seconds": 7.052,
+    "passed": true,
+    "records": 5000
+  },
+  {
+    "test": "postgres_disk_full",
+    "seconds": 2.6,
+    "passed": true,
+    "atomic_rejection_on_ENOSPC": true,
+    "recovered_records": 200,
+    "host_disk_filled": false
+  },
+  {
+    "test": "source_disk_full",
+    "seconds": 8.425,
+    "passed": true,
+    "valid_source_records_after_ENOSPC": 300,
+    "unique_ids": 300
+  },
+  {
+    "test": "shipper_disk_full",
+    "seconds": 16.145,
+    "passed": true,
+    "source": "shipper-disk-2221c701",
+    "records_after_shipper_ENOSPC": 100,
+    "automatic_recovery_after_freeing_space": true
+  },
+  {
+    "test": "ui_proxy_recovery",
+    "seconds": 2.644,
+    "passed": true,
+    "UI_recovers_after_API_address_change": true,
+    "preserved_records": 22617
+  },
+  {
+    "test": "stream_routing",
+    "seconds": 1.607,
+    "passed": true,
+    "priority_and_explicit_destination": true,
+    "unknown_stream_batch_atomic": true,
+    "rule_changes_preserve_retry_destination": true
+  },
+  {
+    "test": "stream_rollover_and_retry",
+    "seconds": 3.275,
+    "passed": true,
+    "generation_counts": [
+      2,
+      2,
+      1
+    ],
+    "duplicates_after_rollover": 0,
+    "snapshot_survives_rollover": true
+  },
+  {
+    "test": "stream_age_rotation",
+    "seconds": 6.063,
+    "passed": true,
+    "age_threshold_hours": 1,
+    "quiet_stream_rotated": true,
+    "empty_successor_avoided": true
+  },
+  {
+    "test": "stream_size_rotation",
+    "seconds": 10.076,
+    "passed": true,
+    "threshold_bytes": 1048576,
+    "observed_primary_bytes": 4358601,
+    "size_rotation": true
+  },
+  {
+    "test": "stream_retention",
+    "seconds": 9.079,
+    "passed": true,
+    "expired_index_deleted": true,
+    "active_index_preserved": true,
+    "published_payload_cleared": true,
+    "retry_does_not_resurrect": true
+  },
+  {
+    "test": "stream_pending_retention",
+    "seconds": 29.454,
+    "passed": true,
+    "pending_event_protected_during_outage": true,
+    "deletion_waits_for_publication": true
+  },
+  {
+    "test": "stream_settings_restart",
+    "seconds": 1.114,
+    "passed": true,
+    "settings_persist_after_restart": true,
+    "duplicate_name_rejected": true
+  },
+  {
+    "test": "stream_search_errors",
+    "seconds": 0.088,
+    "passed": true,
+    "invalid_query_across_multiple_indices": 400,
+    "invalid_parameters": 400
+  },
+  {
+    "test": "stream_preview_and_fallback_search",
+    "seconds": 0.137,
+    "passed": true,
+    "preview_matches_real_rules": true,
+    "unsaved_draft_evaluated": true,
+    "preview_read_only": true,
+    "fallback_separate_from_all_search": true
+  },
+  {
+    "test": "arbitrary_json_fields",
+    "seconds": 1.321,
+    "passed": true,
+    "no_message_required": true,
+    "all_original_fields_preserved": true,
+    "arrays_and_JSON_pointer_route": true,
+    "extra_field_change_conflicts": true
+  },
+  {
+    "test": "arbitrary_json_types",
+    "seconds": 0.715,
+    "passed": true,
+    "mixed_types": 6,
+    "large_integer_preserved": true,
+    "extreme_exponent_stored_safely": true,
+    "long_values_and_NUL_preserved": true
+  },
+  {
+    "test": "legacy_json_retry",
+    "seconds": 1.579,
+    "passed": true,
+    "pre_upgrade_identity_retry_accepted": true,
+    "logical_records": 1
+  },
+  {
+    "test": "reconcile",
+    "seconds": 1.61,
+    "passed": true,
+    "durable_records": 22703,
+    "indexed_records": 22703,
+    "pending": 0
+  }
+]

@@ -38,14 +38,27 @@ func main() {
 	baseIndex := cfg.OpenSearchIndex
 	prepareCtx, prepareCancel := context.WithTimeout(ctx, 15*time.Second)
 	prepareErr := osClient.PrepareStorage(prepareCtx, baseIndex)
+	if prepareErr == nil {
+		prepareErr = osClient.EnsureReadAlias(prepareCtx, search.StorageIndex(baseIndex))
+	}
 	prepareCancel()
 	if prepareErr != nil {
 		log.Printf("search storage preparation deferred; durable intake remains available: %v", prepareErr)
 	}
 	cfg.OpenSearchIndex = search.StorageIndex(baseIndex)
+	cfg.SearchReadIndex = search.ReadAlias(cfg.OpenSearchIndex)
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
-	go func() { defer close(workerDone); ingest.Run(workerCtx, db.NewIngestStore(pool), osClient, baseIndex) }()
+	go func() {
+		defer close(workerDone)
+		lifecycleDone := make(chan struct{})
+		go func() {
+			defer close(lifecycleDone)
+			ingest.RunLifecycle(workerCtx, pool, osClient, cfg.OpenSearchIndex)
+		}()
+		ingest.Run(workerCtx, db.NewIngestStore(pool), osClient, baseIndex)
+		<-lifecycleDone
+	}()
 	defer func() { workerCancel(); <-workerDone }()
 
 	if cfg.SeedSampleLogs && prepareErr == nil {

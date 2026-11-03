@@ -17,6 +17,10 @@ docker compose up --build -d
 
 Then open http://localhost:3000
 
+Use **Streams & storage** to create destinations, set routing rules, rotate
+per-stream indices and configure retention. Automatic deletion defaults to off.
+See [stream settings and delivery examples](docs/streams.md).
+
 ### Dev mode (faster on WSL)
 
 ```bash
@@ -61,8 +65,9 @@ atomic PostgreSQL commit. OpenSearch indexing follows asynchronously.
 Fluent Bit keeps its read offsets and pending deliveries in the
 `fluent_bit_state` Docker volume. Keep this volume when recreating the shipper.
 See [ingestion behavior and upgrade instructions](docs/ingestion.md) before
-upgrading an existing pipeline. The versioned search index is `logs-v2`;
-the original `logs` index remains as a backup after migration.
+upgrading an existing pipeline. Search uses `logs-v2-read` across the preserved
+`logs-v2` index and new per-stream generations. The original `logs` index remains
+as a backup after migration.
 
 ### Regression checks (WSL)
 
@@ -86,6 +91,8 @@ The optional Windows browser check is `py ui/tests/browser_smoke.py` from the
 project root (Python Playwright and Edge required).
 See [search behavior and checks](docs/search.md) for snapshot lifetime and cursor
 navigation beyond 10,000 matches, and the [audit closure report](docs/audits/2026-11-03-reliability.md).
+Arbitrary JSON routing and its verification are documented in the
+[JSON routing report](docs/audits/2026-11-03-arbitrary-json.md).
 
 ## Local workspace
 

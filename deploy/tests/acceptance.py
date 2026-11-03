@@ -52,7 +52,7 @@ class Stack:
         self.api = 'http://127.0.0.1:' + self.env['API_PORT']
         self.os = 'http://127.0.0.1:' + self.env['OPENSEARCH_PORT']
         self.ui = 'http://127.0.0.1:' + self.env['UI_PORT']
-        self.index = 'logs-v2'
+        self.index = 'logs-v2-read'
 
     def docker(self, *args, input=None, check=True):
         return subprocess.run(['docker', *args], input=input, capture_output=True, check=check)
@@ -164,10 +164,13 @@ class Stack:
         messages = self.all_messages('*')
         assert len(messages) == 300 and len({m['id'] for m in messages}) == 300
         assert {m['fields']['seq'] for m in messages} == set(range(1, 301))
+        for message in messages:
+            expected = 'web-access' if message['source'] == 'nginx' else 'system' if message['source'] == 'cron' else 'all'
+            assert message['stream'] == expected, message
         status, _ = self.request('/', base=self.ui)
         assert status == 200
         assert self.request('/api/health', base=self.ui)[0] == 200
-        return {'records': 300, 'rotations': 6}
+        return {'records': 300, 'rotations': 6, 'stream_rules_applied_by_API': True}
 
     def mixed_types(self):
         values = ['text', 7, True, {'nested': 3}, ['a', 7], None]
@@ -211,7 +214,7 @@ class Stack:
             events=[{'id':'new-string','message':'string','fields':{'seq':'text'}},
                     {'id':'new-object','message':'object','fields':{'seq':{'nested':True}}}]
             assert self.request('/api/ingest/json',events,base=address)[0]==202
-            self.wait(lambda:self.request('/'+target+'/_count',base=self.os)[1]['count']==202,'new schema accepts mixed fields')
+            self.wait(lambda:self.request('/'+target+'-read/_count',base=self.os)[1]['count']==202,'new schema accepts mixed fields')
             assert self.request('/'+base+'/_count',base=self.os)[1]['count']==200
             return {'migrated_records':200,'original_backup_records':200,'new_mixed_records':2}
         finally:
@@ -219,7 +222,7 @@ class Stack:
             try:process.wait(timeout=15)
             except subprocess.TimeoutExpired:process.kill();process.wait()
             log.close()
-            for owned in [target,base]:self.request('/'+owned,method='DELETE',base=self.os)
+            for owned in [target+'-s-*',target,base]:self.request('/'+owned,method='DELETE',base=self.os)
 
     def deep_snapshot(self):
         timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -289,12 +292,12 @@ class Stack:
         self.wait(lambda:json.loads(self.docker('inspect',self.container('loggen')).stdout)[0]['State']['Status']=='exited',
                   'generator settled after recovery')
         def equal():
-            accepted,pending=map(int,self.sql("SELECT count(*),count(*) FILTER (WHERE published_at IS NULL) FROM ingest_events WHERE index_name='logs-v2'").split('|'))
+            accepted,pending=map(int,self.sql("SELECT count(*),count(*) FILTER (WHERE published_at IS NULL) FROM ingest_events WHERE index_name='logs-v2' AND document IS NOT NULL").split('|'))
             return pending==0 and accepted==self.count()
         self.wait(equal,'all acknowledged records reconciled with search index')
         time.sleep(1)
         assert equal()
-        accepted=int(self.sql("SELECT count(*) FROM ingest_events WHERE index_name='logs-v2'"))
+        accepted=int(self.sql("SELECT count(*) FROM ingest_events WHERE index_name='logs-v2' AND document IS NOT NULL"))
         return {'durable_records':accepted,'indexed_records':self.count(),'pending':0}
 
 
@@ -302,7 +305,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--keep', action='store_true')
     parser.add_argument('--resume', type=Path)
-    parser.add_argument('--phase', choices=['basic', 'faults', 'all'], default='all')
+    parser.add_argument('--phase', choices=['basic', 'streams', 'faults', 'all'], default='all')
     parser.add_argument('--only', help='Run one named failure drill in an existing owned test project')
     args = parser.parse_args()
     stack = Stack(args.keep, args.resume)
@@ -314,6 +317,9 @@ def main():
         if args.phase in ('faults', 'all'):
             from acceptance_faults import run_faults
             run_faults(stack, args.only)
+        if args.phase in ('streams', 'all'):
+            from stream_acceptance import run_stream_checks
+            run_stream_checks(stack)
         if args.phase=='all': stack.run('reconcile',stack.reconcile)
     finally:
         stack.cleanup()

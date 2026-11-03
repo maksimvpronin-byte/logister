@@ -69,7 +69,7 @@ with sync_playwright() as p:
     assert levels and all(level == 'error' for level in levels), levels
     assert page.locator('.level.error').first.evaluate('(el) => getComputedStyle(el).padding') == '0px'
     page.locator('tbody tr').first.click()
-    expect(page.locator('.details')).to_contain_text('stream=web-access')
+    expect(page.locator('.details .message-stream')).to_contain_text('web-access')
     page.screenshot(path=str(args.artifacts / 'search-pages-fixed.png'), full_page=False)
     print('PASS: query, stream/time filters, details and ERROR styling', flush=True)
 

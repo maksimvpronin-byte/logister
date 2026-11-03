@@ -106,15 +106,17 @@ func EnsureIndex(ctx context.Context, c *Client, index string) error {
 }
 
 type Message struct {
-	ID        string         `json:"id"`
-	Timestamp time.Time      `json:"timestamp"`
-	Message   string         `json:"message"`
-	Source    string         `json:"source"`
-	Level     string         `json:"level"`
-	Host      string         `json:"host"`
-	Stream    string         `json:"stream"`
-	Facility  string         `json:"facility,omitempty"`
-	Fields    map[string]any `json:"fields,omitempty"`
+	ID          string          `json:"id"`
+	Timestamp   time.Time       `json:"timestamp"`
+	Message     string          `json:"message"`
+	Source      string          `json:"source"`
+	Level       string          `json:"level"`
+	Host        string          `json:"host"`
+	Stream      string          `json:"stream"`
+	Facility    string          `json:"facility,omitempty"`
+	Fields      map[string]any  `json:"fields,omitempty"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	PayloadJSON string          `json:"payload_json,omitempty"`
 }
 
 type SearchParams struct {
@@ -148,6 +150,13 @@ const (
 
 var ErrInvalidQuery = errors.New("invalid search query")
 
+func timestampRange(from, to time.Time) map[string]any {
+	// Explicit epoch milliseconds avoid OpenSearch filling omitted fractional
+	// seconds up to the end of the second for an inclusive upper bound.
+	// Managed and legacy timestamp mappings use the millisecond-resolution date type.
+	return map[string]any{"gte": from.UnixMilli(), "lte": to.UnixMilli(), "format": "epoch_millis"}
+}
+
 func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*SearchResult, error) {
 	if p.Size <= 0 || p.Size > MaxPageSize {
 		p.Size = DefaultPageSize
@@ -171,16 +180,17 @@ func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*Sea
 		},
 		map[string]any{
 			"range": map[string]any{
-				"@timestamp": map[string]any{
-					"gte": p.From.UTC().Format(time.RFC3339Nano),
-					"lte": p.To.UTC().Format(time.RFC3339Nano),
-				},
+				"@timestamp": timestampRange(p.From, p.To),
 			},
 		},
 	}
 	if p.Stream != "" && p.Stream != "all" {
+		stream := p.Stream
+		if stream == "@default" {
+			stream = "all"
+		}
 		must = append(must, map[string]any{
-			"term": map[string]any{"stream": p.Stream},
+			"term": map[string]any{"stream": stream},
 		})
 	}
 
@@ -230,7 +240,9 @@ func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*Sea
 			} `json:"hits"`
 		} `json:"hits"`
 	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&parsed); err != nil {
 		return nil, err
 	}
 
@@ -266,6 +278,18 @@ func mapHit(id string, src map[string]any) Message {
 	}
 	if fields, ok := src["fields"].(map[string]any); ok {
 		m.Fields = fields
+	}
+	if payload, ok := src["payload_json"].(string); ok && json.Valid([]byte(payload)) {
+		m.Payload = []byte(payload)
+		m.PayloadJSON = payload
+		var original map[string]any
+		decoder := json.NewDecoder(strings.NewReader(payload))
+		decoder.UseNumber()
+		if decoder.Decode(&original) == nil {
+			if fields, ok := original["fields"].(map[string]any); ok {
+				m.Fields = fields
+			}
+		}
 	}
 	return m
 }

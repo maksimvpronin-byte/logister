@@ -5,6 +5,24 @@
 `POST /api/ingest/json` accepts an object, an array, or a Fluent Bit wrapper
 containing a JSON line in `log`. The complete request is validated before writing.
 
+Any JSON object can be an event; `message` is optional. Null/scalar elements in a
+batch are rejected before writing. Without a text message, a bounded JSON summary
+is generated for display. Arbitrary properties, nested shapes and original types
+are preserved as `payload_json`, returned alongside the decoded `payload`.
+Recognized string ID/delivery_id/stream retain their existing protocol meanings.
+
+The complete payload is stored as an unindexed JSON string, avoiding dynamic
+mapping conflicts and PostgreSQL JSONB numeric/NUL limitations. Routing reads
+the full input before projection. Legacy searchable `fields` are bounded for
+large values; response fields are restored from the original where available.
+Expanded UI rows display structured fields by default, with the original
+JSON available in a separate tab and through the copy button.
+
+New events hash the complete payload, so an additional-field change under the
+same ID returns 409. Existing accepted identities retain their old comparison
+version for compatible retries. Fields discarded by older API versions cannot
+be recovered retroactively.
+
 | Endpoint | Body limit | Batch limit |
 | --- | --- | --- |
 | `/api/ingest/json` | 1 MiB | 1,000 messages |
@@ -40,18 +58,22 @@ source file generates a new UUID. Sources that must survive checkpoint resets
 must therefore include stable IDs in the file itself. The bundled generator does.
 
 PostgreSQL keeps accepted documents and identity receipts after publication.
+Configured stream retention can clear published payloads after their index is
+deleted; identity receipts remain to prevent resurrection of expired events.
 The publisher uses fixed OpenSearch document IDs and commits its publication
 receipt only after the whole projection batch succeeds. Retrying after a crash
 or a lost OpenSearch acknowledgement overwrites the same IDs. Monitor storage
-growth; automated retention/receipt expiry is not implemented.
+growth; receipt expiry is not implemented. See [stream retention](streams.md).
 
 ## Index schema and upgrade
 
-`OPENSEARCH_INDEX` names the logical base (`logs` by default); storage uses
-`logs-v2`. The new schema stores `fields` as `flat_object`, preserving mixed JSON
-types in returned documents without dynamic mapping conflicts. Searches over
-these values use string semantics; typed numeric/date analytics need dedicated
-mapped fields.
+`OPENSEARCH_INDEX` names the logical base (`logs` by default); the legacy storage
+index is `logs-v2`. New messages use per-stream generations and search uses the
+`logs-v2-read` alias. The schema stores a bounded compatibility projection of
+`fields` as `flat_object`. Searches over these values use string semantics;
+typed numeric/date analytics need dedicated mapped fields. The full original
+JSON is stored separately in unindexed `payload_json`; arbitrary top-level
+properties support routing, but are not automatically searchable Lucene fields.
 
 On first startup, the API copies an existing base index into the versioned index,
 preserves document IDs, verifies counts, and marks the new mapping ready. The
@@ -69,7 +91,7 @@ legacy pipeline:
 3. Preserve the already delivered legacy file under `/logs/pre-v2/`, outside
    `/logs/app.log*`. This prevents later recovery from replaying old ID-less lines.
 4. Back up the old API binary, install the checked version, and wait until
-   health reports `index: logs-v2`, with both services available. Verify the old
+   health reports `index: logs-v2` and `search_index: logs-v2-read`, with both services available. Verify the old
    count is preserved in both indexes while producers are stopped.
 5. Build the custom sender/generator images and sync the dev pipeline definition.
    Recreate those two services with the same named volumes. Verify new delivery
@@ -101,6 +123,10 @@ Source lines must fit Fluent Bit's input buffers and endpoint batch/body limits;
 arbitrarily large lines are outside this contract.
 
 ## Verification
+
+Stream creation, rule routing, explicit destinations, rotation and storage
+settings are described in [stream settings](streams.md). Unknown explicit stream
+names are rejected before any part of the batch is committed.
 
 Run `docker compose build`, then `python3 deploy/tests/acceptance.py` from WSL.
 The suite creates a unique `logister-check-*` project with private ports/volumes,

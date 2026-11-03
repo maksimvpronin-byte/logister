@@ -14,8 +14,14 @@ type metadataExecutor interface {
 // UpgradeMetadata repairs the legacy built-in input without overwriting custom
 // input paths or unrelated settings. It is safe to run on every API startup.
 func UpgradeMetadata(ctx context.Context, executor metadataExecutor) error {
+	if _, err := executor.Exec(ctx, streamSchema); err != nil {
+		return fmt.Errorf("upgrade stream settings: %w", err)
+	}
 	if _, err := executor.Exec(ctx, ingestSchema); err != nil {
 		return fmt.Errorf("create durable ingestion tables: %w", err)
+	}
+	if err := UpgradeRoutingDefaults(ctx, executor); err != nil {
+		return err
 	}
 	_, err := executor.Exec(ctx, `
 		UPDATE inputs

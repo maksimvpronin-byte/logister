@@ -121,3 +121,31 @@ func TestFailedInitialQueryClosesSnapshot(t *testing.T) {
 		t.Fatalf("err=%v closed=%d", err, closed.Load())
 	}
 }
+
+func TestAliasSearchClassifiesPartialQueryFailures(t *testing.T) {
+	for _, kind := range []string{"query_shard_exception", "parse_exception", "no_shard_available_action_exception"} {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/_mapping") {
+				fmt.Fprint(w, `{"physical-1":{"mappings":{"_meta":{"ready":true}}}}`)
+				return
+			}
+			if strings.Contains(r.URL.Path, "point_in_time") {
+				fmt.Fprint(w, `{"pit_id":"snapshot"}`)
+				return
+			}
+			fmt.Fprintf(w, `{"_shards":{"failed":1,"failures":[{"reason":{"type":%q}}]},"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}`, kind)
+		}))
+		client, err := NewClient(backend.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.SearchPage(context.Background(), "read-alias", SearchParams{Size: 10}, "")
+		backend.Close()
+		if err == nil {
+			t.Fatal("partial failure was accepted")
+		}
+		if errors.Is(err, ErrInvalidQuery) != (kind != "no_shard_available_action_exception") {
+			t.Fatal(kind, err)
+		}
+	}
+}

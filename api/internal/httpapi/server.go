@@ -23,10 +23,11 @@ import (
 )
 
 type Server struct {
-	cfg    config.Config
-	pool   *pgxpool.Pool
-	search *search.Client
-	store  batchAcceptor
+	cfg     config.Config
+	pool    *pgxpool.Pool
+	search  *search.Client
+	store   batchAcceptor
+	catalog streamCatalog
 }
 
 type batchAcceptor interface {
@@ -34,13 +35,23 @@ type batchAcceptor interface {
 }
 
 func NewServer(cfg config.Config, pool *pgxpool.Pool, searchClient *search.Client) *Server {
-	return &Server{cfg: cfg, pool: pool, search: searchClient, store: db.NewIngestStore(pool)}
+	server := &Server{cfg: cfg, pool: pool, search: searchClient, store: db.NewIngestStore(pool)}
+	if pool != nil {
+		server.catalog = db.NewStreamStore(pool)
+	}
+	return server
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/streams", s.handleStreams)
+	mux.HandleFunc("POST /api/streams", s.handleSaveStream)
+	mux.HandleFunc("POST /api/streams/preview-routing", s.handleRoutingPreview)
+	mux.HandleFunc("PUT /api/streams/{name}", s.handleSaveStream)
+	mux.HandleFunc("GET /api/streams/{name}/indices", s.handleStreamIndices)
+	mux.HandleFunc("POST /api/streams/{name}/rotate", s.handleRotateStream)
+	mux.HandleFunc("POST /api/streams/{name}/ingest", s.handleIngestJSON)
 	mux.HandleFunc("GET /api/inputs", s.handleInputs)
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("DELETE /api/search/session", s.handleCloseSearch)
@@ -52,7 +63,7 @@ func (s *Server) Handler() http.Handler {
 func withCORS(origin string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -97,7 +108,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pgOK := db.Ping(ctx, s.pool) == nil
-	osOK := s.search.Ready(ctx, s.cfg.OpenSearchIndex) == nil
+	osOK := s.search.Ready(ctx, s.readIndex()) == nil
 	var pending any
 	if pgOK && s.pool != nil {
 		if count, err := db.NewIngestStore(s.pool).Pending(ctx, s.cfg.OpenSearchIndex); err == nil {
@@ -115,11 +126,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"time":             time.Now().UTC(),
 		"pending_messages": pending,
 		"index":            s.cfg.OpenSearchIndex,
+		"search_index":     s.readIndex(),
 	})
 }
 
 func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
-	streams, err := db.ListStreams(r.Context(), s.pool)
+	streams, err := s.catalog.List(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -149,7 +161,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "cursor must be used without other search parameters")
 			return
 		}
-		result, err := s.search.SearchPage(r.Context(), s.cfg.OpenSearchIndex, search.SearchParams{}, q.Get("cursor"))
+		result, err := s.search.SearchPage(r.Context(), s.readIndex(), search.SearchParams{}, q.Get("cursor"))
 		if err != nil {
 			s.searchError(w, err)
 			return
@@ -218,7 +230,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		offset = value
 	}
 
-	result, err := s.search.SearchPage(r.Context(), s.cfg.OpenSearchIndex, search.SearchParams{
+	result, err := s.search.SearchPage(r.Context(), s.readIndex(), search.SearchParams{
 		Query:  q.Get("q"),
 		From:   from,
 		To:     to,
@@ -272,19 +284,31 @@ type ingestRequest struct {
 	Timestamp  *time.Time     `json:"timestamp"`
 	Fields     map[string]any `json:"fields"`
 	// Fluent Bit tail without parser keeps the line here.
-	Log string `json:"log"`
+	Log          string         `json:"log"`
+	Payload      map[string]any `json:"-"`
+	Lookup       map[string]any `json:"-"`
+	ForcedStream string         `json:"-"`
 }
 
 func unwrapIngest(req ingestRequest) ingestRequest {
 	if strings.TrimSpace(req.Message) == "" && strings.TrimSpace(req.Log) != "" {
 		var nested ingestRequest
-		if err := json.Unmarshal([]byte(req.Log), &nested); err == nil && strings.TrimSpace(nested.Message) != "" {
+		if err := json.Unmarshal([]byte(req.Log), &nested); err == nil {
 			if nested.ID == "" {
 				nested.ID = req.ID
 			}
 			if nested.DeliveryID == "" {
 				nested.DeliveryID = req.DeliveryID
 			}
+			lookup := map[string]any{}
+			for key, value := range req.Payload {
+				lookup[key] = value
+			}
+			for key, value := range nested.Payload {
+				lookup[key] = value
+			}
+			nested.Lookup = lookup
+			nested.Payload = req.Payload
 			req = nested
 		} else {
 			req.Message = req.Log
@@ -295,7 +319,7 @@ func unwrapIngest(req ingestRequest) ingestRequest {
 
 func normalizeIngest(req ingestRequest, remote string) (ingestRequest, error) {
 	req = unwrapIngest(req)
-	req.Message = strings.TrimSpace(req.Message)
+	req.Message = payloadMessage(req)
 	if req.Message == "" {
 		return req, errMessageRequired
 	}
@@ -311,6 +335,10 @@ func normalizeIngest(req ingestRequest, remote string) (ingestRequest, error) {
 	if req.Stream == "" {
 		req.Stream = "all"
 	}
+	req.Source = trimText(req.Source, 8000)
+	req.Host = trimText(req.Host, 8000)
+	req.Level = trimText(req.Level, 8000)
+	req.Facility = trimText(req.Facility, 8000)
 	return req, nil
 }
 
@@ -334,7 +362,11 @@ func ingestDocument(req ingestRequest, id string) json.RawMessage {
 		"host":       req.Host,
 		"stream":     req.Stream,
 		"facility":   req.Facility,
-		"fields":     req.Fields,
+		"fields":     indexableValue(req.Fields, 0),
+	}
+	if req.Payload != nil {
+		raw, _ := json.Marshal(req.Payload)
+		doc["payload_json"] = string(raw)
 	}
 	encoded, _ := json.Marshal(doc)
 	return encoded
@@ -402,20 +434,40 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request, limit int6
 		return
 	}
 	events := make([]db.Event, len(batch))
+	var streams []db.Stream
+	if s.catalog != nil {
+		streams, err = s.catalog.List(r.Context())
+		if err != nil {
+			writeJSON(w, 503, map[string]any{"error": "Stream settings are unavailable. Retry with the same event IDs.", "count": 0})
+			return
+		}
+	}
 
 	// Validate every item before writing anything. A client must be able to
 	// correct and retry a malformed batch without duplicating a valid prefix.
 	for i, item := range batch {
 		item = unwrapIngest(item)
-		content := item
-		content.ID = ""
-		content.DeliveryID = ""
-		content.Log = ""
-		canonical, _ := json.Marshal(content)
+		if target := r.PathValue("name"); target != "" {
+			if item.Stream != "" && item.Stream != target {
+				writeError(w, 400, "Message stream conflicts with the destination URL.")
+				return
+			}
+			item.Stream = target
+			item.ForcedStream = target
+		}
+		canonical := canonicalPayload(item)
 		req, err := normalizeIngest(item, r.RemoteAddr)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		if s.catalog != nil {
+			req.Stream = item.Stream
+			req, err = routeIngest(req, streams)
+			if err != nil {
+				writeError(w, 400, err.Error())
+				return
+			}
 		}
 		id := req.ID
 		if id == "" {
@@ -437,8 +489,17 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request, limit int6
 		}
 		id = digest([]byte(s.cfg.OpenSearchIndex + "\x00" + id))
 		events[i] = db.Event{ID: id, Hash: digest(canonical), Document: ingestDocument(req, id)}
+		events[i].HashVersion = 2
+		events[i].LegacyHash = legacyPayloadHash(item)
+		if s.catalog != nil {
+			events[i].StreamName = req.Stream
+		}
 	}
-	receipt, err := s.store.Accept(r.Context(), s.cfg.OpenSearchIndex, key, digest(body), events)
+	batchBody := body
+	if target := r.PathValue("name"); target != "" {
+		batchBody = append(append([]byte(target+"\x00"), body...), byte(0))
+	}
+	receipt, err := s.store.Accept(r.Context(), s.cfg.OpenSearchIndex, key, digest(batchBody), events)
 	if err != nil {
 		if errors.Is(err, db.ErrIdentityConflict) {
 			writeError(w, http.StatusConflict, "Event ID or Idempotency-Key was reused with different data.")

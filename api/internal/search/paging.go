@@ -1,6 +1,7 @@
 package search
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -115,9 +116,13 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 	if q == "" {
 		q = "*"
 	}
-	must := []any{map[string]any{"query_string": map[string]any{"query": q, "default_field": "message", "analyze_wildcard": true, "lenient": true}}, map[string]any{"range": map[string]any{"@timestamp": map[string]any{"gte": cursor.From.Format(time.RFC3339Nano), "lte": cursor.To.Format(time.RFC3339Nano)}}}}
+	must := []any{map[string]any{"query_string": map[string]any{"query": q, "default_field": "message", "analyze_wildcard": true, "lenient": true}}, map[string]any{"range": map[string]any{"@timestamp": timestampRange(cursor.From, cursor.To)}}}
 	if cursor.Stream != "" && cursor.Stream != "all" {
-		must = append(must, map[string]any{"term": map[string]any{"stream": cursor.Stream}})
+		stream := cursor.Stream
+		if stream == "@default" {
+			stream = "all"
+		}
+		must = append(must, map[string]any{"term": map[string]any{"stream": stream}})
 	}
 	timestampOrder, idOrder := "desc", "asc"
 	if cursor.Reverse {
@@ -148,7 +153,10 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 		Took     int64  `json:"took"`
 		TimedOut bool   `json:"timed_out"`
 		Shards   struct {
-			Failed int `json:"failed"`
+			Failed   int `json:"failed"`
+			Failures []struct {
+				Reason json.RawMessage `json:"reason"`
+			} `json:"failures"`
 		} `json:"_shards"`
 		Hits struct {
 			Total struct {
@@ -162,10 +170,21 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 			} `json:"hits"`
 		} `json:"hits"`
 	}
-	if e = json.Unmarshal(raw, &parsed); e != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if e = decoder.Decode(&parsed); e != nil {
 		return nil, e
 	}
 	if parsed.TimedOut || parsed.Shards.Failed > 0 {
+		// Empty shards can succeed while populated shards reject the expression,
+		// making OpenSearch return HTTP 200 with partial failures across an alias.
+		queryFailure := !parsed.TimedOut && len(parsed.Shards.Failures) > 0
+		for _, failure := range parsed.Shards.Failures {
+			queryFailure = queryFailure && isQueryShardFailure(failure.Reason)
+		}
+		if queryFailure {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidQuery, raw)
+		}
 		return nil, errors.New("search returned incomplete results")
 	}
 	if parsed.PIT != "" {
@@ -204,6 +223,21 @@ func (c *Client) SearchPage(ctx context.Context, index string, p SearchParams, t
 		result.SessionID = ""
 	}
 	return result, nil
+}
+
+func isQueryShardFailure(raw json.RawMessage) bool {
+	var reason struct {
+		Type     string          `json:"type"`
+		CausedBy json.RawMessage `json:"caused_by"`
+	}
+	if json.Unmarshal(raw, &reason) != nil {
+		return false
+	}
+	switch reason.Type {
+	case "query_shard_exception", "parse_exception", "parsing_exception", "query_parsing_exception":
+		return true
+	}
+	return false
 }
 
 func newCursorKey() ([32]byte, error) { var key [32]byte; _, err := rand.Read(key[:]); return key, err }

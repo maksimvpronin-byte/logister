@@ -18,6 +18,9 @@ func Run(ctx context.Context, store *db.IngestStore, client *search.Client, base
 		count := 0
 		if !ready {
 			err = client.PrepareStorage(task, base)
+			if err == nil {
+				err = client.EnsureReadAlias(task, search.StorageIndex(base))
+			}
 			ready = err == nil
 		}
 		if ready && err == nil {
@@ -27,7 +30,7 @@ func Run(ctx context.Context, store *db.IngestStore, client *search.Client, base
 			}
 		}
 		if err == nil {
-			count, err = store.Publish(task, search.StorageIndex(base), func(events []db.Event) error { return client.IndexEvents(task, search.StorageIndex(base), events) })
+			count, err = store.Publish(task, search.StorageIndex(base), func(events []db.Event) error { return client.PublishEvents(task, search.StorageIndex(base), events) })
 		}
 		cancel()
 		delay := 200 * time.Millisecond

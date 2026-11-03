@@ -33,6 +33,63 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('existing search UI', () => {
+  it('adds field-menu conditions to the query draft and applies them on Search', async () => {
+    const user = userEvent.setup(); render(<App />);
+    await screen.findByText('message-0', { exact: true });
+    await user.clear(screen.getByLabelText('Search query')); await user.type(screen.getByLabelText('Search query'), 'level:error OR level:warn');
+    await user.click(screen.getByRole('button', { name: 'Show fields for message 0' }));
+    const trigger = screen.getByRole('button', { name: 'Actions for field source' });
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue(new DOMRect(20, 50, 24, 24));
+    await user.click(trigger);
+    await user.click(screen.getByRole('menuitem', { name: /Добавить в поиск/ }));
+    expect(screen.getByLabelText('Search query')).toHaveValue('(level:error OR level:warn) AND (source:"nginx")');
+    expect(searchLogs).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(2));
+    expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ q: '(level:error OR level:warn) AND (source:"nginx")', relative: '24h' }));
+  });
+  it('applies custom local bounds and keeps cursor paging independent of draft edits', async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchLogs).mockResolvedValueOnce(result()).mockResolvedValueOnce(result()).mockResolvedValueOnce(result(100));
+    render(<App />);
+    await screen.findByText('message-0', { exact: true });
+    await user.selectOptions(screen.getByLabelText('Time range'), 'custom');
+    fireEvent.change(screen.getByLabelText('From', { exact: true }), { target: { value: '2026-11-03T03:00:00' } });
+    fireEvent.change(screen.getByLabelText('To', { exact: true }), { target: { value: '2026-11-03T04:00:00' } });
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await screen.findByText('message-0', { exact: true });
+    const request = vi.mocked(searchLogs).mock.calls[1][0];
+    expect(request.from).toBe(new Date(2026, 10, 3, 3).toISOString());
+    expect(request.to).toBe(new Date(2026, 10, 3, 4).toISOString());
+    expect(request).not.toHaveProperty('relative');
+    expect(screen.getByLabelText('Applied time range').querySelector('time')).toHaveAttribute('datetime', range.from);
+    fireEvent.change(screen.getByLabelText('From', { exact: true }), { target: { value: '2026-11-04T03:00:00' } });
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText('message-100', { exact: true });
+    expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'next-0' }));
+    expect(searchLogs).toHaveBeenLastCalledWith(expect.not.objectContaining({ from: expect.anything() }));
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Start must be earlier than end.');
+    expect(searchLogs).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('message-100', { exact: true })).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText('Time range'), '1h');
+    await user.selectOptions(screen.getByLabelText('Time range'), 'custom');
+    expect(screen.getByLabelText('From', { exact: true })).toHaveValue('2026-11-04T03:00:00');
+    await user.selectOptions(screen.getByLabelText('Time range'), '1h');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(4));
+    expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ relative: '1h' }));
+    expect(searchLogs).toHaveBeenLastCalledWith(expect.not.objectContaining({ from: expect.anything() }));
+  });
+  it('separates the all-streams view from the unmatched destination', async () => {
+    const user = userEvent.setup(); render(<App />);
+    await screen.findByText('message-0', { exact: true });
+    expect(screen.getByRole('option', { name: 'All messages' })).toHaveValue('all');
+    expect(screen.getByRole('option', { name: 'Unmatched messages' })).toHaveValue('@default');
+    await user.selectOptions(screen.getByLabelText('Stream', { exact: true }), '@default');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ stream: '@default' })));
+  });
   it('keeps PostgreSQL up and streams available when only OpenSearch is down', async () => {
     vi.mocked(fetchHealth).mockResolvedValue({ status: 'degraded', postgres: true, opensearch: false, time: range.to });
     render(<App />);

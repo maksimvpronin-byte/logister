@@ -118,3 +118,28 @@ func TestPublicationReplaysAfterLostAcknowledgement(t *testing.T) {
 		t.Fatal(pending)
 	}
 }
+
+func TestLegacyIdentityCompatibilityDoesNotWeakenNewPayloadHashes(t *testing.T) {
+	ctx, tx := ingestionTransaction(t)
+	store := NewIngestStore(tx)
+	old := testEvent("old", "legacy-hash")
+	if _, err := store.Accept(ctx, "test", "", "", []Event{old}); err != nil {
+		t.Fatal(err)
+	}
+	upgraded := old
+	upgraded.Hash = "full-payload-hash"
+	upgraded.HashVersion = 2
+	upgraded.LegacyHash = "legacy-hash"
+	if receipt, err := store.Accept(ctx, "test", "", "", []Event{upgraded}); err != nil || receipt.Duplicates != 1 {
+		t.Fatal(receipt, err)
+	}
+	fresh := upgraded
+	fresh.ID = "new"
+	if _, err := store.Accept(ctx, "test", "", "", []Event{fresh}); err != nil {
+		t.Fatal(err)
+	}
+	fresh.Hash = "changed-extra-field"
+	if _, err := store.Accept(ctx, "test", "", "", []Event{fresh}); err != ErrIdentityConflict {
+		t.Fatal("v2 accepted changed payload", err)
+	}
+}

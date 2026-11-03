@@ -103,6 +103,14 @@ def postgres_disk_full(stack):
     stack.docker('exec', '-u', '0', container, 'chown', 'postgres:postgres', '/quota')
     stack.docker('exec', '-u', '0', container, 'chmod', '700', '/quota')
     stack.sql("CREATE TABLESPACE fault_quota LOCATION '/quota'; ALTER TABLE ingest_events SET TABLESPACE fault_quota;")
+    # The heap can reuse existing free pages even when its filesystem is full.
+    # Force a real new-block write in the same ingestion transaction instead of
+    # relying on incidental heap fragmentation to trigger ENOSPC.
+    stack.sql("""CREATE TABLE quota_write_probe(payload text) TABLESPACE fault_quota;
+        CREATE FUNCTION quota_write_probe() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO quota_write_probe VALUES ('force a new database block'); RETURN NEW; END $$;
+        CREATE TRIGGER quota_write_probe BEFORE INSERT ON ingest_events
+        FOR EACH ROW WHEN (NEW.document->>'source'='disk-full') EXECUTE FUNCTION quota_write_probe();""")
     try:
         fill = stack.docker('exec', '-u', '0', container, 'dd', 'if=/dev/zero', 'of=/quota/test-fill', 'bs=1M', 'count=80', check=False)
         assert fill.returncode != 0 and b'No space left' in fill.stderr, fill.stderr
@@ -118,7 +126,7 @@ def postgres_disk_full(stack):
         return {'atomic_rejection_on_ENOSPC': True, 'recovered_records': 200, 'host_disk_filled': False}
     finally:
         stack.docker('exec', '-u', '0', container, 'rm', '-f', '/quota/test-fill', check=False)
-        stack.sql('ALTER TABLE ingest_events SET TABLESPACE pg_default; DROP TABLESPACE fault_quota;')
+        stack.sql('DROP TRIGGER quota_write_probe ON ingest_events; DROP FUNCTION quota_write_probe(); DROP TABLE quota_write_probe; ALTER TABLE ingest_events SET TABLESPACE pg_default; DROP TABLESPACE fault_quota;')
 
 
 def source_disk_full(stack):
@@ -177,7 +185,17 @@ def shipper_disk_full(stack):
 
 
 def ui_proxy_recovery(stack):
+    # compose start can restart the bounded generator through dependencies.
+    # Wait for it and the asynchronous projection before comparing snapshots.
+    stack.wait(lambda: json.loads(stack.docker('inspect', stack.container('loggen')).stdout)[0]['State']['Status'] == 'exited',
+               'bounded generator settled before proxy check')
+    stack.wait(lambda: stack.request('/api/health')[1].get('pending_messages') == 0,
+               'publisher settled before proxy check')
+    assert stack.request('/'+stack.index+'/_refresh', {}, base=stack.os)[0] == 200
     before = stack.count()
+    baseline = stack.search('*', size=200)
+    baseline_ids = {message['id'] for message in baseline['messages']}
+    stack.close(baseline)
     stack.wait(lambda: stack.request('/api/health', base=stack.ui)[0] == 200,
                'UI proxy healthy before address change')
     network = stack.project + '_default'
@@ -195,8 +213,13 @@ def ui_proxy_recovery(stack):
         stack.wait(lambda: stack.request('/api/health', base=stack.ui)[0] == 200,
                    'UI proxy follows changed API address')
         result = stack.request('/api/search?size=1', base=stack.ui)
-        assert result[0] == 200 and result[1]['total'] == before, result
+        # A tail flush can still arrive after the generator exits. New records
+        # are allowed; verify the pre-restart records rather than requiring an
+        # unchanged total while the sender remains active.
+        assert result[0] == 200 and result[1]['total'] >= before, result
         stack.close(result[1])
+        retained = stack.all_messages('event_id:(' + ' OR '.join(sorted(baseline_ids)) + ')')
+        assert {message['id'] for message in retained} == baseline_ids
         return {'UI_recovers_after_API_address_change': True, 'preserved_records': before}
     finally:
         stack.docker('rm', '-f', holder, check=False)

@@ -1,4 +1,8 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
+import StreamsSettings from "./StreamsSettings";
+import MessageDetails from "./MessageDetails";
+import { absoluteTimeRange, formatRangeTime, localDateTime } from "./timeRange";
+import { appendFieldSearch } from "./fieldSearch";
 import {
   fetchHealth,
   fetchStreams,
@@ -27,6 +31,7 @@ function formatTime(value: string) {
 }
 
 export default function App() {
+  const [view, setView] = useState<"search" | "streams">("search");
   const [health, setHealth] = useState<Health | null>(null);
   const [healthLoading, setHealthLoading] = useState(true);
   const [healthError, setHealthError] = useState<string | null>(null);
@@ -34,6 +39,12 @@ export default function App() {
   const [streams, setStreams] = useState<Stream[]>([]);
   const [query, setQuery] = useState("*");
   const [relative, setRelative] = useState("24h");
+  const [absoluteFrom, setAbsoluteFrom] = useState(() => localDateTime(new Date(Date.now() - 86400000)));
+  const [absoluteTo, setAbsoluteTo] = useState(() => localDateTime(new Date()));
+  const [rangeError, setRangeError] = useState("");
+  const [appliedRange, setAppliedRange] = useState<{ from: string; to: string } | null>(null);
+  const customRangeInitialized = useRef(false);
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [stream, setStream] = useState("all");
   const [messages, setMessages] = useState<Message[]>([]);
   const [total, setTotal] = useState(0);
@@ -50,11 +61,17 @@ export default function App() {
   const searchController = useRef<AbortController | null>(null);
 
   async function runSearch(nextOffset = 0, paging = false) {
+    const cursor = paging ? nextOffset > offset ? nextCursor : previousCursor : undefined;
+    let timeParams: { relative: string } | { from: string; to: string } | undefined;
+    if (!cursor) {
+      try { timeParams = relative === "custom" ? absoluteTimeRange(absoluteFrom, absoluteTo) : { relative }; }
+      catch (error) { setRangeError(error instanceof Error ? error.message : "Choose a valid time range."); return; }
+    }
+    setRangeError("");
     const requestId = ++searchRequest.current;
     searchController.current?.abort();
     const controller = new AbortController();
     searchController.current = controller;
-    const cursor = paging ? nextOffset > offset ? nextCursor : previousCursor : undefined;
     if (!paging && session.current) {
       void closeSearchSession(session.current).catch(() => {});
       session.current = "";
@@ -66,10 +83,11 @@ export default function App() {
     setTotalRelation("eq");
     setTookMs(0);
     setSelected(null);
+    setAppliedRange(null);
     try {
       const result = await searchLogs(cursor
         ? { cursor, signal: controller.signal }
-        : { q: query, relative, stream, size: PAGE_SIZE, offset: 0, signal: controller.signal });
+        : { q: query, ...timeParams, stream, size: PAGE_SIZE, offset: 0, signal: controller.signal });
       if (requestId !== searchRequest.current || controller.signal.aborted) {
         if (result.session_id && result.session_id !== session.current) void closeSearchSession(result.session_id).catch(() => {});
         return;
@@ -82,6 +100,7 @@ export default function App() {
       setNextCursor(result.next_cursor);
       setPreviousCursor(result.previous_cursor);
       setTookMs(result.took_ms);
+      setAppliedRange({ from: result.from, to: result.to });
     } catch (e) {
       if (requestId !== searchRequest.current || controller.signal.aborted) return;
       setError(e instanceof Error ? e.message : "Search failed");
@@ -167,7 +186,14 @@ export default function App() {
         </div>
       </header>
 
-      <form className="searchbar" onSubmit={onSubmit}>
+      <nav className="section-nav" aria-label="Workspace sections">
+        <button type="button" aria-pressed={view === "search"} onClick={() => setView("search")}>Messages</button>
+        <button type="button" aria-pressed={view === "streams"} onClick={() => setView("streams")}>Streams &amp; storage</button>
+      </nav>
+      {view === "streams" && <StreamsSettings onSaved={setStreams} />}
+      <section hidden={view !== "search"} aria-label="Message search">
+
+      <form className="searchbar" onSubmit={onSubmit} noValidate>
         <input
           aria-label="Search query"
           value={query}
@@ -177,7 +203,14 @@ export default function App() {
         />
         <select
           value={relative}
-          onChange={(e) => setRelative(e.target.value)}
+          onChange={(e) => {
+            const value = e.target.value;
+            if (value === "custom" && !customRangeInitialized.current) {
+              if (appliedRange) { setAbsoluteFrom(localDateTime(appliedRange.from)); setAbsoluteTo(localDateTime(appliedRange.to)); }
+              customRangeInitialized.current = true;
+            }
+            setRelative(value); setRangeError("");
+          }}
           aria-label="Time range"
         >
           {RELATIVE_OPTIONS.map((o) => (
@@ -185,26 +218,35 @@ export default function App() {
               {o.label}
             </option>
           ))}
+          <option value="custom">Custom range</option>
         </select>
         <select
           value={stream}
           onChange={(e) => setStream(e.target.value)}
           aria-label="Stream"
         >
-          {streams.length === 0 ? (
-            <option value="all">all</option>
-          ) : (
-            streams.map((s) => (
-              <option key={s.id} value={s.name}>
-                {s.title}
+          <option value="all">All messages</option>
+          {streams.map((s) => (
+              <option key={s.id} value={s.name === "all" ? "@default" : s.name}>
+                {s.name === "all" && s.title === "All messages" ? "Unmatched messages" : s.title}
               </option>
-            ))
-          )}
+            ))}
         </select>
         <button type="submit" disabled={loading}>
           {loading ? "Searching…" : "Search"}
         </button>
+        {relative === "custom" && <div className="absolute-range">
+          <label>From<input type="text" aria-label="From" placeholder="DD.MM.YYYY HH:mm:ss" autoComplete="off" spellCheck={false} required value={absoluteFrom} aria-invalid={Boolean(rangeError)} aria-describedby="time-range-help" onChange={event => { setAbsoluteFrom(event.target.value); setRangeError(""); }} /></label>
+          <label>To<input type="text" aria-label="To" placeholder="DD.MM.YYYY HH:mm:ss" autoComplete="off" spellCheck={false} required value={absoluteTo} aria-invalid={Boolean(rangeError)} aria-describedby="time-range-help" onChange={event => { setAbsoluteTo(event.target.value); setRangeError(""); }} /></label>
+          <p id="time-range-help">Format: DD.MM.YYYY HH:mm:ss (seconds optional). Times in {timeZone}. Both boundaries are included. Click Search to apply.</p>
+        </div>}
+        {rangeError && <div className="request-error time-range-error" role="alert">{rangeError}</div>}
       </form>
+
+      {appliedRange && <div className="applied-range" aria-label="Applied time range">
+        Applied period: <time dateTime={appliedRange.from}>{formatRangeTime(appliedRange.from)}</time>
+        <span aria-hidden="true"> — </span><time dateTime={appliedRange.to}>{formatRangeTime(appliedRange.to)}</time>
+      </div>}
 
       <div className="meta">
         <span>
@@ -245,7 +287,8 @@ export default function App() {
             </thead>
             <tbody>
               {messages.map((m) => (
-                <tr key={m.id} onClick={() => setSelected(m.id)}>
+                <Fragment key={m.id}>
+                <tr className="message-row" data-selected={selected === m.id} onClick={() => setSelected(selected === m.id ? null : m.id)}>
                   <td>{formatTime(m.timestamp)}</td>
                   <td>
                     <span className={`level ${m.level || "info"}`}>
@@ -255,20 +298,20 @@ export default function App() {
                   <td>{m.source}</td>
                   <td>{m.host}</td>
                   <td className="msg">
+                    <button className="message-toggle" type="button" aria-label={`${selected === m.id ? "Hide" : "Show"} fields for message ${m.id}`} aria-expanded={selected === m.id} onClick={event => { event.stopPropagation(); setSelected(selected === m.id ? null : m.id); }}><span aria-hidden="true">{selected === m.id ? "▾" : "▸"}</span></button>
                     {m.message}
-                    {selected === m.id && m.fields ? (
-                      <div className="details">
-                        stream={m.stream} · fields=
-                        {JSON.stringify(m.fields)}
-                      </div>
-                    ) : null}
                   </td>
                 </tr>
+                {selected === m.id && <tr className="message-detail-row"><td colSpan={5}>
+                  <MessageDetails message={m} onClose={() => setSelected(null)} onSearch={(clause, exclude) => setQuery(current => appendFieldSearch(current, clause, exclude))} />
+                </td></tr>}
+                </Fragment>
               ))}
             </tbody>
           </table>
         )}
       </div>
+      </section>
     </div>
   );
 }

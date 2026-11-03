@@ -7,6 +7,7 @@ type Config struct {
 	DatabaseURL     string
 	OpenSearchURL   string
 	OpenSearchIndex string
+	SearchReadIndex string
 	CORSOrigin      string
 	SeedSampleLogs  bool
 }

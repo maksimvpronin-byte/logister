@@ -57,8 +57,13 @@ func (c *Client) Ready(ctx context.Context, index string) error {
 	if err := json.Unmarshal(raw, &mapping); err != nil {
 		return err
 	}
-	if !mapping[index].Mappings.Meta.Ready {
-		return fmt.Errorf("index migration is not complete")
+	if len(mapping) == 0 {
+		return fmt.Errorf("index mapping is empty")
+	}
+	for _, entry := range mapping {
+		if !entry.Mappings.Meta.Ready {
+			return fmt.Errorf("index migration is not complete")
+		}
 	}
 	return nil
 }

@@ -40,7 +40,6 @@ while true; do
   user=$(pick "alice bob carol dave eve")
   client=$(pick "10.0.0.12 10.0.0.55 192.168.1.10 203.0.113.8")
   status=200
-  stream="all"
 
   case "$level" in
     warn) status=429 ;;
@@ -50,7 +49,6 @@ while true; do
   case "$source" in
     nginx)
       msg="$client - $user [$(date -u '+%d/%b/%Y:%H:%M:%S +0000')] \"GET $path HTTP/1.1\" $status $(( $(rand 900) + 40 ))"
-      stream="web-access"
       ;;
     auth-service)
       if [ "$level" = "error" ] || [ "$level" = "warn" ]; then
@@ -64,7 +62,6 @@ while true; do
       ;;
     cron)
       msg="cron job backup-step-$((i % 5)) finished in $(( $(rand 40) + 1 ))s"
-      stream="system"
       level="info"
       ;;
     gateway)
@@ -78,8 +75,9 @@ while true; do
   msg_esc=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  line=$(printf '{"id":"%s-%s","timestamp":"%s","message":"%s","source":"%s","level":"%s","host":"%s","stream":"%s","fields":{"seq":%s,"path":"%s","client":"%s"}}' \
-    "$RUN_ID" "$i" "$ts" "$msg_esc" "$source" "$level" "$HOST_NAME" "$stream" "$i" "$path" "$client")
+  # The API applies the editable stream rules; the source only describes events.
+  line=$(printf '{"id":"%s-%s","timestamp":"%s","message":"%s","source":"%s","level":"%s","host":"%s","fields":{"seq":%s,"path":"%s","client":"%s"}}' \
+    "$RUN_ID" "$i" "$ts" "$msg_esc" "$source" "$level" "$HOST_NAME" "$i" "$path" "$client")
   # On ENOSPC a write can be partial. Restore the last complete file and move it
   # aside before retrying this same event, so tail never joins partial JSON lines.
   while true; do
