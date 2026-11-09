@@ -108,8 +108,8 @@ paths, names, input types and unrelated settings.
 ## Checks
 
 Go tests check parameter bounds, cursor signature validation, forward/backward
-navigation, cleanup, errors and metadata migration. Real PostgreSQL tests are
-enabled by `LOGISTER_TEST_DATABASE_URL`. UI tests cover metadata failures,
+navigation, cleanup, errors and metadata migration. Real MongoDB tests are
+enabled by `LOGISTER_TEST_MONGO_URL`. UI tests cover metadata failures,
 pagination, stale responses, search resets and polling cleanup.
 Field-viewer tests check nested paths, old records, null/boolean values and exact
 large numbers. `py ui/tests/message_fields_smoke.py` checks the real `new-stream`

@@ -1,0 +1,35 @@
+# Opt-in direct Kafka ingestion on the single-instance Compose deployment.
+services:
+  mongo:
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25", "--replSet", "logister-single"]
+
+  mongo-init:
+    image: mongo:8.0@sha256:b9924c330a8bbc5800fe9c69f04a84e221eca7b28fd049a0354147d9908fa142
+    depends_on:
+      mongo:
+        condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        for i in $$(seq 1 90); do
+          if mongosh --host mongo --quiet --eval '
+            const status = db.hello();
+            if (status.setName === "logister-single" && status.isWritablePrimary) quit(0);
+            if (!status.setName) {
+              try { rs.initiate({_id: "logister-single", members: [{_id: 0, host: "mongo:27017"}]}); }
+              catch (e) { if (e.codeName !== "AlreadyInitialized") throw e; }
+            }
+            quit(1);
+          '; then exit 0; fi
+          sleep 1
+        done
+        exit 1
+
+  api:
+    environment:
+      KAFKA_DIRECT: "true"
+      DATABASE_URL: mongodb://mongo:27017/logister?replicaSet=logister-single
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully

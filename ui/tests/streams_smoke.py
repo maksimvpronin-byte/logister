@@ -19,7 +19,7 @@ with sync_playwright() as p:
     page=browser.new_page(viewport={'width':1440,'height':1100})
     errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
     page.goto(args.url)
-    expect(page.get_by_text('postgres доступен',exact=True)).to_be_visible()
+    expect(page.get_by_text('mongo доступен',exact=True)).to_be_visible()
     page.get_by_role('button',name='Потоки и хранение',exact=True).click()
     expect(page.get_by_label('Идентификатор',exact=True)).to_be_visible()
     page.get_by_role('button',name='Создать поток',exact=True).click()
@@ -51,6 +51,7 @@ with sync_playwright() as p:
     print('PASS: persisted settings survive reload',flush=True)
 
     token='browser-message-'+uuid.uuid4().hex
+    page.get_by_text('Проверка приёма',exact=True).click()
     page.get_by_label('Сообщение',exact=True).fill(token)
     with page.expect_response(lambda response:response.url.endswith('/api/streams/'+name+'/ingest')) as sent:
         page.get_by_role('button',name='Отправить сообщение',exact=True).click()

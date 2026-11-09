@@ -25,7 +25,7 @@ beforeEach(() => {
   window.history.replaceState(null, "", "/");
   vi.resetAllMocks();
   vi.mocked(closeSearchSession).mockResolvedValue(undefined);
-  vi.mocked(fetchHealth).mockResolvedValue({ status: 'ok', postgres: true, redis: true, opensearch: true, time: range.to });
+  vi.mocked(fetchHealth).mockResolvedValue({ status: 'ok', mongo: true, redis: true, opensearch: true, time: range.to });
   vi.mocked(fetchStreams).mockResolvedValue({ streams: [
     { id: 'all', name: 'all', title: "Все сообщения", description: '' },
     { id: 'web', name: 'web-access', title: 'Web access', description: '' },
@@ -36,6 +36,18 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('existing search UI', () => {
+  it('previews a long message but expands its full tail', async () => {
+    const user = userEvent.setup();
+    const page = result(0, 1);
+    const full = 'start '.repeat(200) + 'tailsearchmarker';
+    page.messages[0].message = full;
+    vi.mocked(searchLogs).mockResolvedValue(page);
+    render(<App />);
+    expect(await screen.findByText(full.slice(0, 500) + '…', { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(full, { exact: true })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Показать поля сообщения 0' }));
+    expect(screen.getAllByText(full, { exact: true }).length).toBeGreaterThan(0);
+  });
   it('adds field-menu conditions to the query draft and applies them on Search', async () => {
     const user = userEvent.setup(); render(<App />);
     await screen.findByText('message-0', { exact: true });
@@ -67,7 +79,7 @@ describe('existing search UI', () => {
     expect(request).not.toHaveProperty('relative');
     expect(screen.getByLabelText("Выбранный период").querySelector('time')).toHaveAttribute('datetime', range.from);
     fireEvent.change(screen.getByLabelText("С", { exact: true }), { target: { value: '2026-11-04T03:00:00' } });
-    await user.click(screen.getByRole('button', { name: "Следующая страница" }));
+    await user.click(screen.getAllByRole('button', { name: "Следующая страница" })[0]);
     await screen.findByText('message-100', { exact: true });
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'next-0' }));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.not.objectContaining({ from: expect.anything() }));
@@ -76,27 +88,29 @@ describe('existing search UI', () => {
     expect(searchLogs).toHaveBeenCalledTimes(3);
     expect(screen.getByText('message-100', { exact: true })).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("Период"), '1h');
+    await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(4));
+    expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ relative: '1h' }));
     await user.selectOptions(screen.getByLabelText("Период"), 'custom');
     expect(screen.getByLabelText("С", { exact: true })).toHaveValue('2026-11-04T03:00:00');
+    expect(searchLogs).toHaveBeenCalledTimes(4);
     await user.selectOptions(screen.getByLabelText("Период"), '1h');
-    await user.click(screen.getByRole('button', { name: "Найти" }));
-    await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(searchLogs).toHaveBeenCalledTimes(5));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ relative: '1h' }));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.not.objectContaining({ from: expect.anything() }));
   });
   it('separates the all-streams view from the unmatched destination', async () => {
     const user = userEvent.setup(); render(<App />);
     await screen.findByText('message-0', { exact: true });
-    expect(screen.getByRole('option', { name: "Все сообщения" })).toHaveValue('all');
+    expect(screen.getByRole('option', { name: "Все сообщения" })).toHaveValue('');
     expect(screen.getByRole('option', { name: "Сообщения без совпавших правил" })).toHaveValue('@default');
     await user.selectOptions(screen.getByLabelText("Поток", { exact: true }), '@default');
     await user.click(screen.getByRole('button', { name: "Найти" }));
     await waitFor(() => expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ stream: '@default' })));
   });
-  it('keeps PostgreSQL up and streams available when only OpenSearch is down', async () => {
-    vi.mocked(fetchHealth).mockResolvedValue({ status: 'degraded', postgres: true, redis: true, opensearch: false, time: range.to });
+  it('keeps MongoDB up and streams available when only OpenSearch is down', async () => {
+    vi.mocked(fetchHealth).mockResolvedValue({ status: 'degraded', mongo: true, redis: true, opensearch: false, time: range.to });
     render(<App />);
-    expect(await screen.findByText('postgres доступен')).toBeInTheDocument();
+    expect(await screen.findByText('mongo доступен')).toBeInTheDocument();
     expect(screen.getByText('redis доступен')).toBeInTheDocument();
     expect(screen.getByText('opensearch недоступен')).toBeInTheDocument();
     expect(await screen.findByRole('option', { name: 'Web access' })).toBeInTheDocument();
@@ -105,7 +119,7 @@ describe('existing search UI', () => {
   it('keeps metadata failures separate from search results', async () => {
     vi.mocked(fetchStreams).mockRejectedValue(new Error('Cannot load streams'));
     render(<App />);
-    expect(await screen.findByText('postgres доступен')).toBeInTheDocument();
+    expect(await screen.findByText('mongo доступен')).toBeInTheDocument();
     expect(await screen.findByText('Cannot load streams')).toBeInTheDocument();
     expect(await screen.findByText('message-0', { exact: true })).toBeInTheDocument();
   });
@@ -113,7 +127,7 @@ describe('existing search UI', () => {
   it('shows unknown service states on a transport error without discarding streams', async () => {
     vi.mocked(fetchHealth).mockRejectedValue(new Error('Network error'));
     render(<App />);
-    expect(await screen.findByText('postgres неизвестно')).toBeInTheDocument();
+    expect(await screen.findByText('mongo неизвестно')).toBeInTheDocument();
     expect(screen.getByText('opensearch неизвестно')).toBeInTheDocument();
     expect(await screen.findByRole('option', { name: 'Web access' })).toBeInTheDocument();
   });
@@ -140,7 +154,7 @@ describe('existing search UI', () => {
     await screen.findByText('message-0', { exact: true });
     await user.clear(screen.getByRole('textbox'));
     await user.type(screen.getByRole('textbox'), 'level:warn');
-    await user.click(screen.getByRole('button', { name: "Следующая страница" }));
+    await user.click(screen.getAllByRole('button', { name: "Следующая страница" })[0]);
     expect(await screen.findByText('message-100', { exact: true })).toBeInTheDocument();
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'next-0' }));
     expect(searchLogs).toHaveBeenLastCalledWith(expect.not.objectContaining({ relative: expect.anything() }));
@@ -148,24 +162,24 @@ describe('existing search UI', () => {
     await screen.findByText('message-0', { exact: true });
     expect(searchLogs).toHaveBeenLastCalledWith(expect.objectContaining({ q: 'level:warn', relative: '24h', offset: 0 }));
     expect(closeSearchSession).toHaveBeenCalledWith('session');
-    expect(screen.getByRole('button', { name: "Предыдущая страница" })).toBeDisabled();
-    expect(screen.getByRole('button', { name: "Следующая страница" })).toBeDisabled();
+    expect(screen.getAllByRole('button', { name: "Предыдущая страница" })[0]).toBeDisabled();
+    expect(screen.getAllByRole('button', { name: "Следующая страница" })[0]).toBeDisabled();
   });
 
   it('shows a lower-bound marker without an artificial browsing limit', async () => {
     vi.mocked(searchLogs).mockResolvedValue({ ...result(0, 12000), total_relation: 'gte' });
     render(<App />);
-    expect(await screen.findByText(/12000\+ найдено/)).toBeInTheDocument();
+    expect(await screen.findByText(/12\s000\+ найдено/)).toBeInTheDocument();
     expect(screen.queryByText(/first 10000/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: "Следующая страница" })).toBeEnabled();
+    expect(screen.getAllByRole('button', { name: "Следующая страница" })[0]).toBeEnabled();
   });
 
   it('continues browsing beyond the old 10000-result window', async () => {
     vi.mocked(searchLogs).mockResolvedValue(result(10000, 12000));
     render(<App />);
     expect(await screen.findByText('message-10000', { exact: true })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: "Следующая страница" })).toBeEnabled();
-    expect(screen.getByRole('button', { name: "Предыдущая страница" })).toBeEnabled();
+    expect(screen.getAllByRole('button', { name: "Следующая страница" })[0]).toBeEnabled();
+    expect(screen.getAllByRole('button', { name: "Предыдущая страница" })[0]).toBeEnabled();
   });
 
   it('ignores an older search response that arrives after the latest search', async () => {
@@ -181,8 +195,8 @@ describe('existing search UI', () => {
 
   it('refreshes service states and stops polling after unmount', async () => {
     vi.useFakeTimers();
-    vi.mocked(fetchHealth).mockResolvedValueOnce({ status: 'degraded', postgres: true, redis: true, opensearch: false, time: range.to })
-      .mockResolvedValue({ status: 'ok', postgres: true, redis: true, opensearch: true, time: range.to });
+    vi.mocked(fetchHealth).mockResolvedValueOnce({ status: 'degraded', mongo: true, redis: true, opensearch: false, time: range.to })
+      .mockResolvedValue({ status: 'ok', mongo: true, redis: true, opensearch: true, time: range.to });
     let view!: ReturnType<typeof render>;
     await act(async () => { view = render(<App />); });
     expect(screen.getByText('opensearch недоступен')).toBeInTheDocument();

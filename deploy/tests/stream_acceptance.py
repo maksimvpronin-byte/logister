@@ -24,7 +24,7 @@ def send(stack, name, count, prefix=None, **kwargs):
 
 
 def indices(stack, name):
-    return stack.sql("SELECT index_name FROM stream_indices i JOIN streams s ON s.id=i.stream_id WHERE s.name='" + name + "' AND i.namespace='logs-v2' ORDER BY generation").splitlines()
+    return stack.mongo("const s = db.streams.findOne({name: " + json.dumps(name) + "}); if (!s) quit(0); db.stream_indices.find({namespace:'logs-v2', stream_id: s._id}).sort({generation:1}).forEach(i => print(i._id));").splitlines()
 
 
 def stream_routing(stack):
@@ -79,8 +79,8 @@ def stream_age_rotation(stack):
     assert stack.request('/api/streams/age-rotation', stream, method='PUT')[0] == 200
     send(stack, 'age-rotation', 1, prefix='age-first'); stack.expect_count('stream-age-rotation', 1)
     old = indices(stack, 'age-rotation')[0]
-    stack.sql("UPDATE stream_indices SET created_at=now()-interval '2 hours' WHERE index_name='"+old+"'")
-    stack.wait(lambda: stack.sql("SELECT sealed_at IS NOT NULL FROM stream_indices WHERE index_name='"+old+"'") == 't', 'quiet stream age rotation', timeout=35)
+    stack.mongo("db.stream_indices.updateOne({_id: " + json.dumps(old) + "}, {$set: {created_at: new Date(Date.now()-2*60*60*1000)}})")
+    stack.wait(lambda: stack.mongo("const i = db.stream_indices.findOne({_id: " + json.dumps(old) + "}); print(i && i.sealed_at ? 't' : 'f')") == 't', 'quiet stream age rotation', timeout=35)
     assert len(indices(stack, 'age-rotation')) == 1
     send(stack, 'age-rotation', 1, prefix='age-next'); stack.expect_count('stream-age-rotation', 2)
     assert len(indices(stack, 'age-rotation')) == 2
@@ -100,7 +100,7 @@ def stream_size_rotation(stack):
     first = indices(stack, 'size-rotation')[0]
     stats = stack.request('/'+first+'/_stats/store', base=stack.os)[1]['_all']['primaries']['store']['size_in_bytes']
     assert stats >= 1048576, stats
-    stack.wait(lambda: stack.sql("SELECT sealed_at IS NOT NULL FROM stream_indices WHERE index_name='"+first+"'") == 't', 'real primary-store size rollover', timeout=35)
+    stack.wait(lambda: stack.mongo("const i = db.stream_indices.findOne({_id: " + json.dumps(first) + "}); print(i && i.sealed_at ? 't' : 'f')") == 't', 'real primary-store size rollover', timeout=35)
     send(stack, 'size-rotation', 1, prefix='size-next'); stack.expect_count('stream-size-rotation', 65)
     assert len(indices(stack, 'size-rotation')) >= 2
     return {'threshold_bytes': 1048576, 'observed_primary_bytes': stats, 'size_rotation': True}
@@ -111,8 +111,8 @@ def stream_retention(stack):
     events = send(stack, 'retention-fixture', 2, prefix='expire')
     stack.expect_count('stream-retention-fixture', 2)
     old, active = indices(stack, 'retention-fixture')
-    stack.sql("UPDATE stream_indices SET sealed_at=now()-interval '2 days' WHERE index_name='"+old+"'")
-    stack.wait(lambda: stack.sql("SELECT deleted_at IS NOT NULL FROM stream_indices WHERE index_name='"+old+"'") == 't', 'sealed index expired', timeout=35)
+    stack.mongo("db.stream_indices.updateOne({_id: " + json.dumps(old) + "}, {$set: {sealed_at: new Date(Date.now()-2*24*60*60*1000)}})")
+    stack.wait(lambda: stack.mongo("const i = db.stream_indices.findOne({_id: " + json.dumps(old) + "}); print(i && i.deleted_at ? 't' : 'f')") == 't', 'sealed index expired', timeout=35)
     assert stack.request('/'+old, method='HEAD', base=stack.os)[0] == 404
     assert stack.request('/'+active, method='HEAD', base=stack.os)[0] == 200
     stack.wait(lambda: stack.count('stream-retention-fixture') == 1, 'expired data absent from search')
@@ -132,15 +132,15 @@ def stream_pending_retention(stack):
     try:
         send(stack, 'pending-retention', 2, prefix='pending-expire')
         old = indices(stack, 'pending-retention')[0]
-        stack.sql("UPDATE stream_indices SET sealed_at=now()-interval '2 days' WHERE index_name='"+old+"'")
+        stack.mongo("db.stream_indices.updateOne({_id: " + json.dumps(old) + "}, {$set: {sealed_at: new Date(Date.now()-2*24*60*60*1000)}})")
         time.sleep(12)
-        assert stack.sql("SELECT deleted_at IS NULL FROM stream_indices WHERE index_name='"+old+"'") == 't'
+        assert stack.mongo("const i = db.stream_indices.findOne({_id: " + json.dumps(old) + "}); print(i && i.deleted_at == null ? 't' : 'f')") == 't'
         pending = stack.redis('GET', 'logister:target-pending:logs-v2:' + old)
         assert pending not in ('', '(nil)', '0')
     finally:
         stack.compose('start', 'opensearch')
     stack.wait(lambda: stack.request('/api/health')[0] == 200, 'search restored', timeout=150)
-    stack.wait(lambda: stack.sql("SELECT deleted_at IS NOT NULL FROM stream_indices WHERE index_name='"+old+"'") == 't', 'expired index removed only after durable publication', timeout=60)
+    stack.wait(lambda: stack.mongo("const i = db.stream_indices.findOne({_id: " + json.dumps(old) + "}); print(i && i.deleted_at ? 't' : 'f')") == 't', 'expired index removed only after durable publication', timeout=60)
     stack.wait(lambda: stack.count('stream-pending-retention') == 1, 'active record retained')
     return {'pending_event_protected_during_outage': True, 'deletion_waits_for_publication': True}
 

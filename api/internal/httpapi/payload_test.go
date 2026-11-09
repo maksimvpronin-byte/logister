@@ -45,9 +45,9 @@ func TestAnyJSONIsPreservedAndDisplayMetadataCannotLoseFields(t *testing.T) {
 		t.Fatal("extra-field change was not an identity conflict", response.Body.String())
 	}
 }
-func TestLongMessageExcerptKeepsFullPayloadIdentity(t *testing.T) {
+func TestLongMessageIsFullyIndexedAndKeepsPayloadIdentity(t *testing.T) {
 	handler, store := ingestHandler(t, 0)
-	head, tail := strings.Repeat("a", searchExcerptBytes), strings.Repeat("b", 200)
+	head, tail := strings.Repeat("начало ", 1500), " tailsearchmarker завершение"
 	raw := `{"id":"long","message":"` + head + tail + `"}`
 	response, _ := ingestCall(t, handler, []byte(raw), false)
 	if response.Code != 202 {
@@ -55,8 +55,8 @@ func TestLongMessageExcerptKeepsFullPayloadIdentity(t *testing.T) {
 	}
 	doc := store.snapshots()[0]
 	message, _ := doc["message"].(string)
-	if message != head+"…" {
-		t.Fatalf("excerpt = %q", message)
+	if message != head+tail {
+		t.Fatal("searchable message was truncated")
 	}
 	original, _ := doc["payload_json"].(string)
 	if !strings.Contains(original, head+tail) {
@@ -96,5 +96,37 @@ func TestPreviewAcceptsRawJSONWithoutMessageAndPreservesNumberPrecision(t *testi
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != 200 || !strings.Contains(response.Body.String(), `"stream":"numbers"`) {
 		t.Fatal(response.Code, response.Body.String())
+	}
+}
+
+func TestTypedSearchMetadataPreservesInvalidRawValues(t *testing.T) {
+	for _, tc := range []struct {
+		raw   string
+		valid bool
+	}{
+		{`{"message":"ok","service":"billing","request_id":"req-1","trace_id":"abc","status":503,"ip":"192.0.2.1"}`, true},
+		{`{"message":"ok","service":{},"request_id":false,"trace_id":[],"status":1e999999,"ip":"invalid"}`, false},
+	} {
+		var req ingestRequest
+		if err := json.Unmarshal([]byte(tc.raw), &req); err != nil {
+			t.Fatal(err)
+		}
+		normalized, err := normalizeIngest(req, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(ingestDocument(normalized, "id"), &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"service", "request_id", "trace_id", "status", "ip"} {
+			_, exists := doc[key]
+			if exists != tc.valid {
+				t.Fatalf("%s: indexed=%v", key, exists)
+			}
+		}
+		if doc["payload_json"] != tc.raw {
+			t.Fatal("original payload modified")
+		}
 	}
 }

@@ -16,7 +16,7 @@ with sync_playwright() as p:
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.on('console', lambda message: errors.append(message.text) if 'Invalid regular expression' in message.text else None)
     page.goto(args.url)
-    expect(page.get_by_text('postgres доступен', exact=True)).to_be_visible()
+    expect(page.get_by_text('mongo доступен', exact=True)).to_be_visible()
     page.get_by_role('button', name='Потоки и хранение', exact=True).click()
     page.get_by_role('button', name='Создать поток', exact=True).click()
     title = page.get_by_label('Название', exact=True)

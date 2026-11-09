@@ -149,3 +149,20 @@ func TestAliasSearchClassifiesPartialQueryFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestSignedCursorSupportsManyShardsAndRemainsBounded(t *testing.T) {
+	client, _ := NewClient("http://127.0.0.1:9200")
+	cursor := pageCursor{PIT: strings.Repeat("p", 20000), Size: 1}
+	token := client.sealCursor(cursor)
+	restored, err := client.openCursor(token)
+	if err != nil || restored.PIT != cursor.PIT {
+		t.Fatal("valid large cursor rejected", err)
+	}
+	if _, err = client.openCursor(token + "x"); !errors.Is(err, ErrExpiredCursor) {
+		t.Fatal("tampered cursor accepted", err)
+	}
+	cursor.PIT = strings.Repeat("p", MaxSearchSessionBytes)
+	if _, err = client.openCursor(client.sealCursor(cursor)); !errors.Is(err, ErrExpiredCursor) {
+		t.Fatal("oversized cursor accepted", err)
+	}
+}

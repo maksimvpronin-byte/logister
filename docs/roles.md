@@ -120,7 +120,7 @@ works even when LDAP is down; its administrator grant cannot be removed. Its
 password is hashed with bcrypt at startup. It is separate from the LDAP server's
 `cn=admin` account. The `.env` file is excluded from Git.
 
-Use **Пользователи и роли → Предоставить доступ** to choose a directory user/group, role and
+Use **Доступ → Назначения → Предоставить доступ** to choose a directory user/group, role and
 scope, then save that assignment. Existing rows have **Edit** and **Remove**
 actions: editing replaces that row immediately after **Сохранить изменения**, and
 removal requires confirmation. **Cancel** leaves saved access unchanged.
@@ -178,7 +178,7 @@ Administrators manage `GET /api/auth/directory?q=...` and `GET/PUT /api/auth/gra
 
 ```sh
 cd api
-LOGISTER_TEST_DATABASE_URL='postgres://logister:logister@127.0.0.1:5432/logister?sslmode=disable' go test ./...
+LOGISTER_TEST_MONGO_URL='mongodb://127.0.0.1:27017' go test ./...
 go vet ./...
 cd ../ui
 npm test
@@ -200,7 +200,7 @@ an identity-provider outage. PostgreSQL tests run in isolated transaction schema
 
 ## LDAP connection settings
 
-Administrators can open **Настройки LDAP** (`/#/ldap`) to configure the server URL,
+Administrators open **Доступ → Каталог** (`/#/ldap`) to configure the server URL,
 reader Bind DN/password, and user/group search bases. The page and all three
 endpoints (`GET/PUT /api/auth/ldap`, `POST /api/auth/ldap/test`) require the system
 administrator role; other authenticated users receive 403.
@@ -211,7 +211,7 @@ rechecks the connection, reader bind, search-base access and representative
 previous configuration active. Empty bases are allowed and reported as empty;
 records must expose `entryUUID` and the adapter's uid/cn attributes.
 
-Connection settings are persisted in PostgreSQL with revision checks. LDAP
+Connection settings are persisted in MongoDB with revision checks. LDAP
 operations read the saved configuration on each request, so changes apply without
 a restart and across API instances. Environment variables only initialize the
 first stored record; subsequent restarts never overwrite saved settings. LDAP

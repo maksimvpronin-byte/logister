@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,7 +27,10 @@ func (req *ingestRequest) UnmarshalJSON(raw []byte) error {
 	if object == nil {
 		return errors.New("each message must be a JSON object")
 	}
-	*req = ingestRequest{Payload: object}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return errors.New("each message must contain exactly one JSON object")
+	}
+	*req = ingestRequest{Payload: object, PayloadRaw: raw}
 	text := func(key string) string { value, _ := object[key].(string); return value }
 	req.ID = text("id")
 	req.DeliveryID = text("delivery_id")
@@ -140,17 +144,14 @@ func indexableValue(value any, depth int) any {
 	}
 }
 
-// searchExcerptBytes is the searchable and list preview. The complete input stays
-// in the unindexed payload, so a long log is not stored and analyzed twice.
-const searchExcerptBytes = 500
-
+// The searchable message is complete. Preview truncation belongs to the UI.
 func payloadMessage(req ingestRequest) string {
 	if strings.TrimSpace(req.Message) != "" {
-		return trimText(strings.TrimSpace(req.Message), searchExcerptBytes)
+		return strings.TrimSpace(req.Message)
 	}
 	if req.Payload != nil {
 		raw, _ := json.Marshal(req.Payload)
-		return trimText(string(raw), searchExcerptBytes)
+		return string(raw)
 	}
 	return ""
 }

@@ -15,7 +15,7 @@ with sync_playwright() as p:
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(args.url)
-    expect(page.get_by_text('postgres доступен', exact=True)).to_be_visible()
+    expect(page.get_by_text('mongo доступен', exact=True)).to_be_visible()
     query = page.get_by_role('textbox', name='Поисковый запрос')
     base = 'source:gateway OR source:nginx'
     query.fill(base)

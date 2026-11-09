@@ -2,51 +2,40 @@ package db
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/logister/logister/api/internal/authz"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 const LocalAdminID = "local-admin"
-const authSchema = `
-CREATE TABLE IF NOT EXISTS auth_sessions (
- token_hash text PRIMARY KEY, user_id text NOT NULL, username text NOT NULL,
- local_user boolean NOT NULL DEFAULT false, expires_at timestamptz NOT NULL
-);
-CREATE INDEX IF NOT EXISTS auth_sessions_expiry ON auth_sessions(expires_at);
-CREATE TABLE IF NOT EXISTS auth_grant_catalog (
- singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
- grants jsonb NOT NULL, revision bigint NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS auth_ldap_settings (
- singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
- server_url text NOT NULL, bind_dn text NOT NULL, users_dn text NOT NULL,
- groups_dn text NOT NULL, password_cipher text NOT NULL,
- revision bigint NOT NULL DEFAULT 1
-);
-`
 
-type authDB interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Begin(context.Context) (pgx.Tx, error)
-}
-type AuthStore struct{ pool authDB }
+type AuthStore struct{ db *DB }
 
-func NewAuthStore(pool authDB) *AuthStore { return &AuthStore{pool: pool} }
+func NewAuthStore(database *DB) *AuthStore { return &AuthStore{db: database} }
+
 func LocalAdminGrant() authz.Grant {
 	return authz.Grant{PrincipalKind: authz.PrincipalUser, PrincipalID: LocalAdminID, Role: authz.RoleAdministrator, Scope: authz.ScopeSystem}
 }
+
+type grantDoc struct {
+	ID       string        `bson:"_id"`
+	Grants   []authz.Grant `bson:"grants"`
+	Revision int64         `bson:"revision"`
+}
+
+func (s *AuthStore) grants() *mongo.Collection { return s.db.coll("auth_grant_catalog") }
+func (s *AuthStore) sessions() *mongo.Collection {
+	return s.db.coll("auth_sessions")
+}
+
 func (s *AuthStore) Initialize(ctx context.Context) error {
-	if _, err := s.pool.Exec(ctx, authSchema); err != nil {
-		return err
+	_, err := s.grants().InsertOne(ctx, grantDoc{ID: "singleton", Grants: []authz.Grant{LocalAdminGrant()}, Revision: 1})
+	if mongo.IsDuplicateKeyError(err) {
+		return nil
 	}
-	raw, _ := json.Marshal([]authz.Grant{LocalAdminGrant()})
-	_, err := s.pool.Exec(ctx, `INSERT INTO auth_grant_catalog(singleton,grants) VALUES(true,$1) ON CONFLICT DO NOTHING`, raw)
 	return err
 }
 
@@ -56,13 +45,15 @@ type GrantCatalog struct {
 }
 
 func (s *AuthStore) Grants(ctx context.Context) (GrantCatalog, error) {
-	var c GrantCatalog
-	var raw []byte
-	err := s.pool.QueryRow(ctx, `SELECT grants,revision FROM auth_grant_catalog WHERE singleton`).Scan(&raw, &c.Revision)
-	if err == nil {
-		err = json.Unmarshal(raw, &c.Grants)
+	var doc grantDoc
+	err := s.grants().FindOne(ctx, bson.M{"_id": "singleton"}).Decode(&doc)
+	if err != nil {
+		return GrantCatalog{}, err
 	}
-	return c, err
+	if doc.Grants == nil {
+		doc.Grants = []authz.Grant{}
+	}
+	return GrantCatalog{Grants: doc.Grants, Revision: doc.Revision}, nil
 }
 
 var ErrGrantConflict = errors.New("role mappings changed; reload before saving")
@@ -80,15 +71,14 @@ func (s *AuthStore) SaveGrants(ctx context.Context, c GrantCatalog) error {
 	if !local || authz.SystemAdministrators(c.Grants) == 0 {
 		return errors.New("the local emergency administrator grant must be preserved")
 	}
-	raw, err := json.Marshal(c.Grants)
+	res, err := s.grants().UpdateOne(ctx, bson.M{"_id": "singleton", "revision": c.Revision}, bson.M{"$set": bson.M{"grants": c.Grants}, "$inc": bson.M{"revision": 1}})
 	if err != nil {
 		return err
 	}
-	result, err := s.pool.Exec(ctx, `UPDATE auth_grant_catalog SET grants=$1,revision=revision+1 WHERE singleton AND revision=$2`, raw, c.Revision)
-	if err == nil && result.RowsAffected() != 1 {
+	if res.MatchedCount != 1 {
 		return ErrGrantConflict
 	}
-	return err
+	return nil
 }
 
 type AuthSession struct {
@@ -97,27 +87,35 @@ type AuthSession struct {
 	Expires          time.Time
 }
 
+type sessionDoc struct {
+	Hash     string    `bson:"_id"`
+	UserID   string    `bson:"user_id"`
+	Username string    `bson:"username"`
+	Local    bool      `bson:"local_user"`
+	Expires  time.Time `bson:"expires_at"`
+}
+
 func (s *AuthStore) CreateSession(ctx context.Context, hash string, session AuthSession) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
+	if _, err := s.sessions().DeleteMany(ctx, bson.M{"expires_at": bson.M{"$lte": time.Now().UTC()}}); err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `DELETE FROM auth_sessions WHERE expires_at<=now()`); err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO auth_sessions(token_hash,user_id,username,local_user,expires_at) VALUES($1,$2,$3,$4,$5)`, hash, session.UserID, session.Username, session.Local, session.Expires)
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	_, err := s.sessions().InsertOne(ctx, sessionDoc{Hash: hash, UserID: session.UserID, Username: session.Username, Local: session.Local, Expires: session.Expires.UTC()})
+	return err
 }
+
 func (s *AuthStore) Session(ctx context.Context, hash string) (AuthSession, error) {
-	var session AuthSession
-	err := s.pool.QueryRow(ctx, `SELECT user_id,username,local_user,expires_at FROM auth_sessions WHERE token_hash=$1 AND expires_at>now()`, hash).Scan(&session.UserID, &session.Username, &session.Local, &session.Expires)
-	return session, err
+	var doc sessionDoc
+	err := s.sessions().FindOne(ctx, bson.M{"_id": hash, "expires_at": bson.M{"$gt": time.Now().UTC()}}).Decode(&doc)
+	if missing(err) {
+		return AuthSession{}, ErrNotFound
+	}
+	if err != nil {
+		return AuthSession{}, err
+	}
+	return AuthSession{UserID: doc.UserID, Username: doc.Username, Local: doc.Local, Expires: doc.Expires}, nil
 }
+
 func (s *AuthStore) DeleteSession(ctx context.Context, hash string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM auth_sessions WHERE token_hash=$1`, hash)
+	_, err := s.sessions().DeleteOne(ctx, bson.M{"_id": hash})
 	return err
 }

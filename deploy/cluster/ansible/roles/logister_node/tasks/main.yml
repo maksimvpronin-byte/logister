@@ -1,0 +1,45 @@
+---
+- name: Validate Logister node settings
+  ansible.builtin.assert:
+    that:
+      - logister_node_id is match('^[a-z0-9][a-z0-9_-]*$')
+      - logister_api_image | default('') | length > 0
+      - logister_ui_image | default('') | length > 0
+      - logister_database_url | default('') | length > 0
+      - logister_opensearch_url | default('') | length > 0
+      - logister_cors_origin | default('') | length > 0
+      - logister_auth_local_password | default('') | length >= 16
+      - logister_auth_local_password | default('') | length <= 72
+      - logister_auth_settings_key | default('') is match('^[0-9a-fA-F]{64}$')
+      - logister_kafka_brokers | length > 0
+    fail_msg: Check the node ID, backend addresses, image names and Vault secrets.
+
+- name: Create Logister deployment directory
+  ansible.builtin.file:
+    path: "{{ logister_install_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Copy the Logister Compose file
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../compose.yaml"
+    dest: "{{ logister_install_dir }}/compose.yaml"
+    mode: "0644"
+
+- name: Write the node environment
+  ansible.builtin.template:
+    src: node.env.j2
+    dest: "{{ logister_install_dir }}/.env"
+    mode: "0600"
+  no_log: true
+
+- name: Start Logister and wait for backend readiness
+  community.docker.docker_compose_v2:
+    docker_host: "{{ logister_docker_host | default(omit) }}"
+    project_src: "{{ logister_install_dir }}"
+    project_name: "{{ logister_project_name }}"
+    state: present
+    pull: "{{ logister_pull_policy }}"
+    build: never
+    wait: true
+    wait_timeout: 180

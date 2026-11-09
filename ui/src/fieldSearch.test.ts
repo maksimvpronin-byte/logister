@@ -6,6 +6,14 @@ import type { Message } from "./api";
 const message: Message = { id: "id", timestamp: "2026-11-03T00:00:00Z", message: "hello", source: "app", host: "server", level: "info", stream: "all" };
 
 describe("field search actions", () => {
+  it("uses explicit service, correlation, status and IP projections", () => {
+    const metadata = { service: 'billing', request_id: 'req1', trace_id: 'trace1', status: 503, ip: '192.0.2.10' };
+    const root = parseMessageFields(JSON.stringify(metadata));
+    for (const node of root.children!) {
+      expect(fieldSearch(node, { ...message, ...metadata })).toEqual({ clause: `${node.path}:"${node.text}"` });
+      expect(fieldSearch(node, message).clause).toBeUndefined();
+    }
+  });
   it("groups existing OR expressions when including or excluding a value", () => {
     expect(appendFieldSearch('level:error OR level:warn', 'host:"server"', false)).toBe('(level:error OR level:warn) AND (host:"server")');
     expect(appendFieldSearch('level:error OR level:warn', 'host:"server"', true)).toBe('(level:error OR level:warn) AND NOT (host:"server")');

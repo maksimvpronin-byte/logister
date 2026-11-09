@@ -16,24 +16,26 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/logister/logister/api/internal/authz"
 	"github.com/logister/logister/api/internal/config"
 	"github.com/logister/logister/api/internal/db"
 	"github.com/logister/logister/api/internal/kafkainput"
 	"github.com/logister/logister/api/internal/search"
+	"github.com/logister/logister/api/internal/telemetry"
 )
 
 type Server struct {
-	kafka   *kafkainput.Consumer
-	cfg     config.Config
-	pool    *pgxpool.Pool
-	search  *search.Client
-	store   batchAcceptor
-	catalog streamCatalog
-	auth    *authentication
-	metrics ingestStatsReader
-	intake  intakeJournal
+	telemetry *telemetry.Meter
+	monitor   *monitoringStore
+	kafka     *kafkainput.Consumer
+	cfg       config.Config
+	database  *db.DB
+	search    *search.Client
+	store     batchAcceptor
+	catalog   streamCatalog
+	auth      *authentication
+	metrics   ingestStatsReader
+	intake    intakeJournal
 }
 
 type intakeJournal interface {
@@ -58,11 +60,10 @@ type batchAcceptor interface {
 	Accept(context.Context, string, string, string, []db.Event) (db.Receipt, error)
 }
 
-func NewServer(cfg config.Config, pool *pgxpool.Pool, searchClient *search.Client) *Server {
-	server := &Server{cfg: cfg, pool: pool, search: searchClient, store: db.NewIngestStore(pool)}
-	if pool != nil {
-		server.catalog = db.NewStreamStore(pool)
-		server.metrics = db.NewIngestStatsStore(pool)
+func NewServer(cfg config.Config, database *db.DB, searchClient *search.Client) *Server {
+	server := &Server{cfg: cfg, database: database, search: searchClient}
+	if database != nil {
+		server.catalog = db.NewStreamStore(database)
 	}
 	return server
 }
@@ -70,6 +71,7 @@ func NewServer(cfg config.Config, pool *pgxpool.Pool, searchClient *search.Clien
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/monitoring", s.handleMonitoring)
 	mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) { writeError(w, 404, "No session.") })
@@ -149,34 +151,38 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	pgOK := db.Ping(ctx, s.pool) == nil
+	mongoOK := s.database != nil && s.database.Ping(ctx) == nil
 	osOK := s.search.Ready(ctx, s.readIndex()) == nil
-	redisOK := s.intake == nil || s.intake.Ping(ctx) == nil
+	backendOK := true
+	backends := map[string]any{}
 	var pending any
-	if s.intake != nil && redisOK {
-		if count, err := s.intake.Pending(ctx, s.cfg.OpenSearchIndex); err == nil {
-			pending = count
-		}
-	} else if pgOK && s.pool != nil && s.intake == nil {
-		if count, err := db.NewIngestStore(s.pool).Pending(ctx, s.cfg.OpenSearchIndex); err == nil {
-			pending = count
+	if s.cfg.KafkaOnly() {
+		task, cancel := context.WithTimeout(ctx, 3*time.Second)
+		backendOK = s.kafka != nil && s.kafka.Ping(task) == nil
+		cancel()
+		backends["kafka"] = backendOK
+	} else {
+		backendOK = s.intake == nil || s.intake.Ping(ctx) == nil
+		backends["redis"] = backendOK
+		if s.intake != nil && backendOK {
+			if count, err := s.intake.Pending(ctx, s.cfg.OpenSearchIndex); err == nil {
+				pending = count
+			}
 		}
 	}
-	ready := pgOK && osOK && redisOK
+	ready := mongoOK && osOK && backendOK
 	status := http.StatusOK
 	if !ready {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, map[string]any{
-		"status":           map[bool]string{true: "ok", false: "degraded"}[ready],
-		"postgres":         pgOK,
-		"redis":            redisOK,
-		"opensearch":       osOK,
-		"time":             time.Now().UTC(),
-		"pending_messages": pending,
-		"index":            s.cfg.OpenSearchIndex,
-		"search_index":     s.readIndex(),
-	})
+	backends["status"] = map[bool]string{true: "ok", false: "degraded"}[ready]
+	backends["mongo"] = mongoOK
+	backends["opensearch"] = osOK
+	backends["time"] = time.Now().UTC()
+	backends["pending_messages"] = pending
+	backends["index"] = s.cfg.OpenSearchIndex
+	backends["search_index"] = s.readIndex()
+	writeJSON(w, status, backends)
 }
 
 func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +208,7 @@ func (s *Server) handleStreams(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInputs(w http.ResponseWriter, r *http.Request) {
-	inputs, err := db.ListInputs(r.Context(), s.pool)
+	inputs, err := db.ListInputs(r.Context(), s.database)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -330,7 +336,7 @@ func (s *Server) handleCloseSearch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"session_id"`
 	}
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 32768)).Decode(&body) != nil || body.SessionID == "" {
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, search.MaxSearchSessionBytes+1024)).Decode(&body) != nil || body.SessionID == "" {
 		writeError(w, 400, "session_id is required")
 		return
 	}
@@ -353,11 +359,12 @@ type ingestRequest struct {
 	Timestamp  *time.Time     `json:"timestamp"`
 	Fields     map[string]any `json:"fields"`
 	// Fluent Bit tail without parser keeps the line here.
-	Log            string         `json:"log"`
-	Payload        map[string]any `json:"-"`
-	Lookup         map[string]any `json:"-"`
-	ForcedStream   string         `json:"-"`
-	KafkaTransport bool           `json:"-"`
+	Log            string          `json:"log"`
+	Payload        map[string]any  `json:"-"`
+	PayloadRaw     json.RawMessage `json:"-"`
+	Lookup         map[string]any  `json:"-"`
+	ForcedStream   string          `json:"-"`
+	KafkaTransport bool            `json:"-"`
 }
 
 func unwrapIngest(req ingestRequest) ingestRequest {
@@ -380,6 +387,7 @@ func unwrapIngest(req ingestRequest) ingestRequest {
 			nested.KafkaTransport = req.KafkaTransport
 			nested.Lookup = lookup
 			nested.Payload = req.Payload
+			nested.PayloadRaw = req.PayloadRaw
 			req = nested
 		} else {
 			req.Message = req.Log
@@ -435,8 +443,14 @@ func ingestDocument(req ingestRequest, id string) json.RawMessage {
 		"facility":   req.Facility,
 		"fields":     indexableValue(req.Fields, 0),
 	}
+	for key, value := range searchMetadata(req) {
+		doc[key] = value
+	}
 	if req.Payload != nil {
-		raw, _ := json.Marshal(req.Payload)
+		raw := req.PayloadRaw
+		if len(raw) == 0 {
+			raw, _ = json.Marshal(req.Payload)
+		}
 		doc["payload_json"] = string(raw)
 	}
 	encoded, _ := json.Marshal(doc)
@@ -460,6 +474,10 @@ func (s *Server) handleIngestJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request, limit int64, maxBatch int) {
+	if s.cfg.KafkaOnly() {
+		writeError(w, http.StatusNotFound, "HTTP ingestion is disabled. Send events to Kafka.")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -525,3 +543,5 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request, limit int6
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "count": receipt.Count, "duplicates": receipt.Duplicates})
 }
+
+func (s *Server) UseTelemetry(m *telemetry.Meter) { s.telemetry = m }

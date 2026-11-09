@@ -6,9 +6,15 @@ import {fetchKafkaStatus,setKafkaPaused,type KafkaStatus}from "./api";
 vi.mock("./api",()=>({fetchKafkaStatus:vi.fn(),setKafkaPaused:vi.fn()}));
 const status:KafkaStatus={enabled:true,topic:"logs",group:"logister",pause_requested:false,running:true,available:100,committed:60,lag:40,retention_loss:false,captured_at:"2026-11-03T10:00:00Z"};
 afterEach(()=>{vi.resetAllMocks();vi.useRealTimers();});
+it("shows backlog without a pause control",async()=>{
+ vi.mocked(fetchKafkaStatus).mockResolvedValue(status);
+ render(<KafkaIndicator/>);await waitFor(()=>expect(screen.getByLabelText("Осталось в Kafka")).toHaveTextContent("40"));
+ expect(screen.queryByRole("button",{name:"Приостановить чтение Kafka"})).not.toBeInTheDocument();
+ expect(screen.getByText(/Пауза чтения находится в разделе/)).toBeInTheDocument();
+});
 it("shows backlog and distinguishes requested pause from completed pause",async()=>{
  vi.mocked(fetchKafkaStatus).mockResolvedValue(status);vi.mocked(setKafkaPaused).mockResolvedValue({...status,pause_requested:true});
- const user=userEvent.setup();render(<KafkaIndicator/>);await waitFor(()=>expect(screen.getByLabelText("Осталось в Kafka")).toHaveTextContent("40"));
+ const user=userEvent.setup();render(<KafkaIndicator controls/>);await waitFor(()=>expect(screen.getByLabelText("Осталось в Kafka")).toHaveTextContent("40"));
  await user.click(screen.getByRole("button",{name:"Приостановить чтение Kafka"}));
  await waitFor(()=>expect(setKafkaPaused).toHaveBeenCalledWith(true));expect(await screen.findByText(/Завершается текущий пакет/)).toBeInTheDocument();
  expect(screen.getByRole("button",{name:"Возобновить чтение Kafka"})).toBeInTheDocument();

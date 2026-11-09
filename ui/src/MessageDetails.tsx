@@ -3,6 +3,7 @@ import type { Message } from "./api";
 import { filterMessageFields, parseMessageFields, prettyMessageJSON, type FieldNode } from "./messageFields";
 import { fieldSearch } from "./fieldSearch";
 import FieldActionsMenu from "./FieldActionsMenu";
+import Icon from "./Icon";
 
 function fieldLabel(node: FieldNode) {
   return !node.path ? "$" : node.key === "" ? '""' : node.key.replace(/\u0000/g, "\\u0000");
@@ -58,9 +59,9 @@ export default function MessageDetails({ message, onClose, onSearch }: { message
   return <section className="details message-details" aria-label="Подробности сообщения">
     <div className="message-details-header">
       <div><strong>Поля сообщения</strong><span className="message-stream">Поток <code>{message.stream}</code>{message.host ? <> · хост {message.host}</> : null}</span></div>
-      <div className="message-details-actions"><button type="button" onClick={copy}>Скопировать JSON</button><button type="button" aria-label="Закрыть подробности сообщения" onClick={onClose}>Закрыть</button></div>
+      <div className="message-details-actions"><button type="button" onClick={copy}><Icon name="copy" />Скопировать JSON</button><button type="button" title="Закрыть" aria-label="Закрыть подробности сообщения" onClick={onClose}><Icon name="close" /></button></div>
     </div>
-    {message.message ? <p className="message-lead">{message.message}</p> : null}
+    {message.message ? <div className="message-content"><span>Текст сообщения</span><p className="message-lead">{message.message}</p></div> : null}
     <div className="message-details-toolbar">
       <div role="tablist" aria-label="Формат сообщения" onKeyDown={event => {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;

@@ -17,6 +17,12 @@ beforeEach(() => {
 });
 
 describe("stream settings", () => {
+  it("directs ingestion checks to Kafka when HTTP ingestion is disabled", async () => {
+    render(<StreamsSettings onSaved={vi.fn()} kafkaOnly />);
+    await userEvent.click(await screen.findByText("Проверка приёма"));
+    expect(screen.getByText(/в настроенный топик Kafka/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Отправить сообщение" })).not.toBeInTheDocument();
+  });
   it("creates a technical ID from the display title and preserves a manual override", async () => {
     const user = userEvent.setup(); render(<StreamsSettings onSaved={vi.fn()} />);
     await screen.findByLabelText("Идентификатор");
@@ -114,6 +120,7 @@ describe("stream settings", () => {
     const user = userEvent.setup();
     vi.mocked(sendStreamMessage).mockRejectedValueOnce(new Error("Connection lost"));
     render(<StreamsSettings onSaved={vi.fn()} />);
+    await user.click(await screen.findByText("Проверка приёма"));
     const form = await screen.findByRole("form", { name: "Отправить сообщение" });
     await user.type(within(form).getByLabelText("Сообщение"), "payment accepted");
     await user.click(within(form).getByRole("button", { name: "Отправить сообщение" }));
@@ -152,6 +159,30 @@ it("requires the stream identifier before deleting and exposes restoration",asyn
  vi.mocked(restoreStream).mockResolvedValue({deleted:false});vi.mocked(fetchStreams).mockResolvedValue({streams:[stream]});
  await user.click(await screen.findByRole("button",{name:"Восстановить Payments"}));
  await waitFor(()=>expect(restoreStream).toHaveBeenCalledWith("payments"));await waitFor(()=>expect(saved).toHaveBeenLastCalledWith([stream]));
+});
+it("asks for a manual identifier when the title has no latin characters", async () => {
+ const user = userEvent.setup();
+ render(<StreamsSettings onSaved={vi.fn()} />);
+ await screen.findByLabelText("Идентификатор");
+ await user.click(screen.getByRole("button", { name: "Создать поток" }));
+ await user.type(screen.getByLabelText("Название"), "Платежи");
+ expect(screen.getByLabelText("Идентификатор")).toHaveValue("");
+ expect(screen.getByText(/Укажите его вручную/)).toBeInTheDocument();
+});
+it("asks before leaving unsaved stream settings", async () => {
+ const user = userEvent.setup();
+ vi.mocked(fetchStreams).mockResolvedValue({ streams: [stream, { ...stream, id: "auth-id", name: "auth", title: "Authentication" }] });
+ render(<StreamsSettings onSaved={vi.fn()} />);
+ await screen.findByLabelText("Название");
+ await user.type(screen.getByLabelText("Название"), "!");
+ await user.click(screen.getByRole("button", { name: "Authentication auth" }));
+ const dialog = await screen.findByRole("dialog");
+ expect(dialog).toHaveTextContent("Перейти без сохранения");
+ await user.click(within(dialog).getByRole("button", { name: "Остаться" }));
+ expect(screen.getByLabelText("Название")).toHaveValue("Payments!");
+ await user.click(screen.getByRole("button", { name: "Authentication auth" }));
+ await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Перейти без сохранения" }));
+ expect(screen.getByLabelText("Название")).toHaveValue("Authentication");
 });
 it("protects the default stream from deletion",async()=>{
  vi.mocked(fetchStreams).mockResolvedValue({streams:[{...stream,name:"all"}]});render(<StreamsSettings onSaved={vi.fn()}/>);await screen.findByLabelText("Идентификатор");

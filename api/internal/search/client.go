@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/logister/logister/api/internal/telemetry"
+	"golang.org/x/sync/singleflight"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	opensearch "github.com/opensearch-project/opensearch-go/v2"
@@ -16,8 +19,18 @@ import (
 )
 
 type Client struct {
-	os        *opensearch.Client
-	cursorKey [32]byte
+	telemetry    *telemetry.Meter
+	os           *opensearch.Client
+	cursorKey    [32]byte
+	preparedMu   sync.Mutex
+	prepared     map[string]time.Time
+	prepareGroup singleflight.Group
+	bulkWorkers  int
+	bulkBytes    int
+	bulkProfile  bool
+	indexShards  int
+	indexCodec   string
+	codecLevel   int
 }
 
 func NewClient(url string) (*Client, error) {
@@ -25,6 +38,7 @@ func NewClient(url string) (*Client, error) {
 		Addresses: []string{url},
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: 30 * time.Second,
+			MaxIdleConns:          64, MaxIdleConnsPerHost: 16, IdleConnTimeout: 90 * time.Second,
 		},
 	}
 	osClient, err := opensearch.NewClient(cfg)
@@ -35,7 +49,7 @@ func NewClient(url string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{os: osClient, cursorKey: key}, nil
+	return &Client{os: osClient, cursorKey: key, prepared: map[string]time.Time{}, bulkWorkers: 1, bulkBytes: 5 << 20}, nil
 }
 
 func (c *Client) Ping(ctx context.Context) error {
@@ -106,6 +120,11 @@ func EnsureIndex(ctx context.Context, c *Client, index string) error {
 }
 
 type Message struct {
+	Service     string          `json:"service,omitempty"`
+	RequestID   string          `json:"request_id,omitempty"`
+	TraceID     string          `json:"trace_id,omitempty"`
+	Status      *int64          `json:"status,omitempty"`
+	IP          string          `json:"ip,omitempty"`
 	ID          string          `json:"id"`
 	Timestamp   time.Time       `json:"timestamp"`
 	Message     string          `json:"message"`
@@ -261,6 +280,7 @@ func (c *Client) Search(ctx context.Context, index string, p SearchParams) (*Sea
 
 func mapHit(id string, src map[string]any) Message {
 	m := Message{
+		Service: asString(src["service"]), RequestID: asString(src["request_id"]), TraceID: asString(src["trace_id"]), IP: asString(src["ip"]),
 		ID:       id,
 		Message:  asString(src["message"]),
 		Source:   asString(src["source"]),
@@ -268,6 +288,15 @@ func mapHit(id string, src map[string]any) Message {
 		Host:     asString(src["host"]),
 		Stream:   asString(src["stream"]),
 		Facility: asString(src["facility"]),
+	}
+	switch n := src["status"].(type) {
+	case json.Number:
+		if value, err := n.Int64(); err == nil {
+			m.Status = &value
+		}
+	case float64:
+		value := int64(n)
+		m.Status = &value
 	}
 	if ts, ok := src["@timestamp"].(string); ok {
 		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
@@ -353,3 +382,5 @@ func (c *Client) Count(ctx context.Context, index string) (int64, error) {
 	}
 	return parsed.Count, nil
 }
+
+func (c *Client) SetTelemetry(m *telemetry.Meter) { c.telemetry = m }

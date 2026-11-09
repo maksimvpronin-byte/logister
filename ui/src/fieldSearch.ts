@@ -12,11 +12,13 @@ export function fieldSearch(node: FieldNode, message: Message): FieldSearch {
     return { reason: "Это значение нельзя безопасно добавить в текстовый поисковый запрос." };
   }
   let field: string;
-  if (["source", "host", "level", "message", "facility", "stream"].includes(node.path)) {
+  if (["source", "host", "level", "message", "facility", "stream", "service", "request_id", "trace_id", "ip"].includes(node.path)) {
     if (node.type !== "string" || node.text !== message[node.path as keyof Message]) {
       return { reason: "Исходное значение отличается от поискового представления этого поля." };
     }
     field = node.path;
+  } else if (node.path === "status" && message.status !== undefined && node.text === String(message.status)) {
+    field = "status";
   } else if (node.path === "timestamp" && node.type === "string"
     && Number.isFinite(Date.parse(node.text)) && Date.parse(node.text) === Date.parse(message.timestamp)) {
     field = "@timestamp";

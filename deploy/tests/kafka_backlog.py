@@ -65,4 +65,6 @@ def main():
    except Exception:
     if attempt==19:raise
     time.sleep(.5)
+ from cleanup_loadtests import cleanup
+ cleanup([stream],apply=True)
 if __name__=='__main__':main()

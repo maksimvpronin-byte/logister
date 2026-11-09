@@ -1,0 +1,16 @@
+---
+logister_node_id: "{{ inventory_hostname }}"
+logister_project_name: "logister-{{ logister_node_id }}"
+logister_install_dir: "/opt/logister/{{ logister_node_id }}"
+logister_bind_address: "127.0.0.1"
+logister_ui_port: 3000
+logister_cookie_secure: true
+logister_opensearch_index: logs
+logister_opensearch_shards: 3
+logister_kafka_brokers: ""
+logister_kafka_topic: logister-ingest
+logister_kafka_group: logister
+logister_ingest_workers: 2
+logister_bulk_workers: 2
+logister_bulk_max_bytes: 6291456
+logister_pull_policy: missing

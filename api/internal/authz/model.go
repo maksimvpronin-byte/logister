@@ -131,11 +131,11 @@ func cloneRole(role Role) Role {
 // Store the stable ID, not the group name: renames in the directory must not
 // drop access. StreamID is the stream primary key, and only for ScopeStream.
 type Grant struct {
-	PrincipalKind PrincipalKind `json:"principal_kind"`
-	PrincipalID   string        `json:"principal_id"`
-	Role          string        `json:"role"`
-	Scope         Scope         `json:"scope"`
-	StreamID      string        `json:"stream_id,omitempty"`
+	PrincipalKind PrincipalKind `json:"principal_kind" bson:"principal_kind"`
+	PrincipalID   string        `json:"principal_id" bson:"principal_id"`
+	Role          string        `json:"role" bson:"role"`
+	Scope         Scope         `json:"scope" bson:"scope"`
+	StreamID      string        `json:"stream_id,omitempty" bson:"stream_id,omitempty"`
 }
 
 // Subject is the identity established at sign-in.

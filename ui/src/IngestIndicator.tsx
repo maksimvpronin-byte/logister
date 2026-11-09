@@ -14,7 +14,7 @@ function sampleRates(previous: IngestStats | null, next: IngestStats): Rates | n
   return { accepted: accepted / seconds, published: published / seconds };
 }
 
-export default function IngestIndicator() {
+export default function IngestIndicator({ compact = false }: { compact?: boolean }) {
   const [stats, setStats] = useState<IngestStats | null>(null);
   const [rates, setRates] = useState<Rates | null>(null);
   const [error, setError] = useState("");
@@ -41,6 +41,7 @@ export default function IngestIndicator() {
     return () => { active = false; controller.abort(); window.clearInterval(timer); };
   }, []);
   const value = (key: keyof IngestStats["totals"]) => stats ? integer.format(stats.totals[key]) : "—";
+  if (compact) return <span className="pipeline-compact">В очереди <strong aria-label="Логов в очереди">{value("pending")}</strong>{rates ? <small>{decimal.format(rates.accepted)} принято/с</small> : null}</span>;
   return <section className="ingest-indicator" aria-label="Обработка логов" aria-busy={loading}>
     <div className="ingest-indicator-heading"><strong>Обработка логов</strong><span>{loading ? "Загрузка показателей…" : error ? "Данные недоступны или устарели" : stats?.totals.pending ? "Есть сообщения в очереди" : "Очередь пуста"}</span><small>Все доступные вам потоки · обновление каждые 1 с</small></div>
     <div className="ingest-counters">

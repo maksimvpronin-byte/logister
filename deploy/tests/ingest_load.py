@@ -1,4 +1,4 @@
-"""Bounded local ingestion benchmark; creates and retains an isolated test stream.
+"""Bounded local ingestion benchmark; creates and cleans up an isolated test stream.
 
 Uses the Fluent Bit HTTP endpoint, batches of 100, max eight in-flight requests.
 Runs search concurrently, saves raw samples and stops escalating on overload.
@@ -141,5 +141,8 @@ def main():
     (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
     print('REPORT',out/'report.json',flush=True)
     print('INTEGRITY',report['integrity_ok'],'count',final_search,flush=True)
+    if report['integrity_ok']:
+        from cleanup_loadtests import cleanup
+        cleanup([stream],apply=True)
 
 if __name__=='__main__':main()

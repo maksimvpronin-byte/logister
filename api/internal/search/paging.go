@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// MaxSearchSessionBytes bounds signed cursors/PIT IDs across many index shards.
+const MaxSearchSessionBytes = 256 << 10
+
 var ErrExpiredCursor = errors.New("search session expired or invalid")
 
 type pageCursor struct {
@@ -35,7 +38,7 @@ func (c *Client) sealCursor(cursor pageCursor) string {
 }
 func (c *Client) openCursor(token string) (pageCursor, error) {
 	var cursor pageCursor
-	if len(token) > 16384 {
+	if len(token) > MaxSearchSessionBytes {
 		return cursor, ErrExpiredCursor
 	}
 	parts := strings.Split(token, ".")
@@ -76,7 +79,7 @@ func (c *Client) closePIT(ctx context.Context, pit string) error {
 	if pit == "" {
 		return nil
 	}
-	if len(pit) > 16384 {
+	if len(pit) > MaxSearchSessionBytes {
 		return ErrExpiredCursor
 	}
 	status, raw, err := c.jsonRequest(ctx, "DELETE", "/_search/point_in_time", map[string]any{"pit_id": []string{pit}})

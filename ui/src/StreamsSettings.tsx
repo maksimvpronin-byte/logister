@@ -10,6 +10,7 @@ function editDraft(stream: Stream): StreamDraft {
   const defaults = emptyDraft();
   return { name: stream.name, title: stream.title, description: stream.description, routing: stream.routing ?? defaults.routing, storage: stream.storage ?? defaults.storage };
 }
+function sameDraft(a: StreamDraft, b: StreamDraft) { return JSON.stringify(a) === JSON.stringify(b); }
 function errorText(error: unknown) { return error instanceof Error ? error.message : "Не удалось выполнить запрос. Повторите попытку."; }
 const streamTitle = streamDisplayTitle;
 function ruleText(rule: RoutingRule) { return rule.operator === "exists" || rule.operator === "not_exists" ? `${rule.field} ${rule.operator === "exists" ? "существует" : "отсутствует"}` : `${rule.field} ${rule.operator === "equals" ? "=" : rule.operator === "starts_with" ? "начинается с" : "содержит"} ${JSON.stringify(rule.value)}`; }
@@ -20,13 +21,14 @@ function suggestedName(title: string) {
 const validName = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const nameHelp = "Технический идентификатор: 1–63 строчные латинские буквы, цифры, дефисы или подчёркивания; начало — буква или цифра. Используется в адресах API и не меняется после создания.";
 
-export default function StreamsSettings({ onSaved }: { onSaved: (streams: Stream[]) => void }) {
+export default function StreamsSettings({ onSaved, kafkaOnly = false }: { onSaved: (streams: Stream[]) => void; kafkaOnly?: boolean }) {
   const [deletedStreams,setDeletedStreams]=useState<Stream[]>([]);
   const [deleteOpen,setDeleteOpen]=useState(false);
   const [deleteName,setDeleteName]=useState("");
   const [copyStatus,setCopyStatus]=useState<""|"copied"|"manual">("");
   const copySource=useRef<HTMLInputElement>(null);
   const [deletedOpen,setDeletedOpen]=useState(false);
+  const [pendingNav, setPendingNav] = useState<{ target?: Stream } | null>(null);
   const [streams, setStreams] = useState<Stream[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<StreamDraft>(emptyDraft);
@@ -76,11 +78,21 @@ export default function StreamsSettings({ onSaved }: { onSaved: (streams: Stream
 
   useEffect(() => { previewRequest.current++; setPreview(null); setPreviewError(""); setPreviewBusy(false); }, [draft, sample]);
 
-  function choose(stream?: Stream) {
-    if (busy) return;
+  function applyChoice(stream?: Stream) {
     setSelected(stream?.name ?? null); setDraft(stream ? editDraft(stream) : emptyDraft());
     setNameEdited(false);
     setError(""); setNotice(""); setMessage(""); retry.current = null;
+    setPendingNav(null);
+  }
+  function draftDirty() {
+    if (!selected) return !sameDraft(draft, emptyDraft());
+    const saved = streams.find(item => item.name === selected);
+    return !saved || !sameDraft(draft, editDraft(saved));
+  }
+  function choose(stream?: Stream) {
+    if (busy) return;
+    if (draftDirty()) { setPendingNav({ target: stream }); return; }
+    applyChoice(stream);
   }
   async function copyDeleteIdentifier() {
     if(!selected)return;
@@ -154,9 +166,10 @@ export default function StreamsSettings({ onSaved }: { onSaved: (streams: Stream
   }
 
   if (loading) return <div className="empty" role="status">Загрузка настроек потоков…</div>;
+  const routedStreams = streams.map(item => item.name === selected ? { ...item, title: draft.title || item.title, routing: draft.routing } : item);
+  const needsManualName = !selected && !nameEdited && draft.title.trim() !== "" && suggestedName(draft.title) === "";
   return <section className="streams-settings" aria-label="Настройки потоков">
-    <div className="settings-heading"><div><h2>Потоки и хранение</h2><p>Настройте маршрутизацию входящих сообщений и хранение каждого потока.</p></div><button type="button" disabled={busy} onClick={() => choose()}>Создать поток</button></div>
-    <div className="stream-delete-tools"><button type="button" disabled={busy} onClick={showDeleted}>Удалённые потоки</button>{selected && selected!=="all" && <button className="danger" type="button" disabled={busy} onClick={()=>{setError("");setDeleteName("");setCopyStatus("");setDeleteOpen(true);}}>Удалить поток</button>}{selected==="all" && <small className="settings-help">Поток по умолчанию нельзя удалить.</small>}</div>
+    <div className="settings-heading"><div><h2>Потоки и хранение</h2><p>Настройте маршрутизацию входящих сообщений и хранение каждого потока.</p></div><div><button type="button" disabled={busy} onClick={showDeleted}>Удалённые потоки</button><button type="button" disabled={busy} onClick={() => choose()}>Создать поток</button></div></div>
     {deletedOpen && <section className="settings-card" aria-label="Удалённые потоки"><div className="settings-heading"><h3>Удалённые потоки</h3><button type="button" onClick={()=>setDeletedOpen(false)}>Закрыть список</button></div>{deletedStreams.length===0?<p>Нет удалённых потоков.</p>:deletedStreams.map(stream=><div className="deleted-stream-row" key={stream.id}><span>{stream.title} <small>{stream.name}</small></span><button type="button" disabled={busy} onClick={()=>changeDeletion(stream.name,false)}>Восстановить {stream.title}</button></div>)}</section>}
     {deleteOpen && <div className="modal-backdrop"><section className="settings-card stream-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-stream-title" onKeyDown={event=>{
  if(event.key==="Escape"&&!busy){event.preventDefault();setDeleteOpen(false);}
@@ -164,12 +177,13 @@ export default function StreamsSettings({ onSaved }: { onSaved: (streams: Stream
  }}><h3 id="delete-stream-title">Удалить поток «{streams.find(s=>s.name===selected)?.title}»?</h3><p>Поток исчезнет из поиска, списка и автоматической маршрутизации. Новые сообщения с его идентификатором не будут приниматься. Сообщения сохранятся до истечения срока хранения. Поток можно восстановить вместе с прежними назначениями доступа.</p>{error&&<p role="alert" className="request-error">{error}</p>}<div className="delete-copy-source"><label>Идентификатор для копирования<input ref={copySource} readOnly value={selected??""} onFocus={event=>event.currentTarget.select()} /></label><button type="button" disabled={busy} onClick={copyDeleteIdentifier}>{copyStatus==="copied"?"Скопировано":"Скопировать"}</button></div>
  <p className="settings-help" role="status">{copyStatus==="manual"?"Идентификатор выделен. Скопируйте его через Ctrl+C / ⌘C и вставьте в поле ниже.":"Скопируйте идентификатор и вставьте его в поле ниже для подтверждения удаления."}</p>
  <label>Введите идентификатор потока<input autoFocus value={deleteName} onChange={e=>setDeleteName(e.target.value)} placeholder={selected??""} /></label><div className="stream-delete-tools"><button type="button" disabled={busy} onClick={()=>setDeleteOpen(false)}>Отмена</button><button className="danger" type="button" disabled={busy||deleteName!==selected} onClick={()=>selected&&changeDeletion(selected,true)}>Подтвердить удаление</button></div></section></div>}
+    {pendingNav && <div className="modal-backdrop"><section className="settings-card stream-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-draft-title" onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); setPendingNav(null); } }}><h3 id="discard-draft-title">Перейти без сохранения?</h3><p>В карточке потока есть несохранённые изменения. Они пропадут.</p><div className="stream-delete-tools"><button type="button" autoFocus onClick={() => setPendingNav(null)}>Остаться</button><button className="danger" type="button" onClick={() => applyChoice(pendingNav.target)}>Перейти без сохранения</button></div></section></div>}
     {error && !deleteOpen && <div className="request-error" role="alert">{error}</div>}
     {notice && <div className="settings-success" role="status">{notice}</div>}
     <section className="routing-overview" aria-label="Сохранённые правила маршрутизации">
       <h3>Как сообщения попадают в потоки</h3>
-      <p className="settings-help">Правила выполняются в порядке приоритета. Сообщение получает первый подходящий поток. Если поток указан в сообщении явно, оно отправляется напрямую в него.</p>
-      <div className="routing-map">{[...streams.filter(stream => stream.name !== "all").sort((a, b) => (a.routing?.priority ?? 100) - (b.routing?.priority ?? 100) || a.name.localeCompare(b.name)), ...streams.filter(stream => stream.name === "all")].map(stream => <div key={stream.name}>
+      <p className="settings-help">Правила выполняются в порядке приоритета. Сообщение получает первый подходящий поток. Если поток указан в сообщении явно, оно отправляется напрямую в него. Для потока, открытого справа, карта показывает текущий черновик.</p>
+      <div className="routing-map">{[...routedStreams.filter(stream => stream.name !== "all").sort((a, b) => (a.routing?.priority ?? 100) - (b.routing?.priority ?? 100) || a.name.localeCompare(b.name)), ...routedStreams.filter(stream => stream.name === "all")].map(stream => <div key={stream.name}>
         <strong>{streamTitle(stream)}</strong><code>{stream.name}</code>
         {stream.name === "all" ? <span>По умолчанию: ни одно правило не совпало</span> : stream.routing?.enabled ? <><span>{stream.routing.rules.map(ruleText).join(stream.routing.match === "all" ? " AND " : " OR ")}</span><small>Приоритет {stream.routing.priority}</small></> : <span>Правила отключены · только явное указание потока</span>}
       </div>)}</div>
@@ -187,12 +201,22 @@ export default function StreamsSettings({ onSaved }: { onSaved: (streams: Stream
           <label>Идентификатор<input aria-label="Идентификатор" required pattern={"[a-z0-9][a-z0-9_\\-]{0,62}"} maxLength={63} disabled={Boolean(selected)} value={draft.name} aria-describedby="stream-name-help" aria-invalid={Boolean(draft.name && !validName.test(draft.name))} onChange={event => {
             const name = event.target.value.toLowerCase().replace(/\s+/g, "-");
             setNameEdited(Boolean(name)); setDraft({ ...draft, name }); setError("");
-          }} placeholder="payments" /><small className="settings-help" id="stream-name-help">{nameHelp} Пробелы заменяются дефисами, заглавные буквы — строчными.</small></label></div>
+          }} placeholder="payments" /><small className="settings-help" id="stream-name-help">{nameHelp} Пробелы заменяются дефисами, заглавные буквы — строчными.</small>{needsManualName && <small className="settings-help" role="status">В названии нет латинских букв и цифр, поэтому идентификатор не заполнен. Укажите его вручную.</small>}</label></div>
           <label>Описание<textarea maxLength={2000} rows={2} value={draft.description} onChange={event => setDraft({ ...draft, description: event.target.value })} /></label>
         </fieldset>
         <fieldset disabled={busy}><legend>Автоматическая маршрутизация</legend>
-          {draft.name === "all" ? <p className="settings-help">Это поток по умолчанию: он получает сообщения, не подошедшие под включённые правила. Пункт «Все сообщения» в поиске объединяет все доступные потоки.</p> : <>
-          <label className="check-label"><input type="checkbox" disabled={draft.name === "all"} checked={draft.routing.enabled} onChange={event => setDraft({ ...draft, routing: { ...draft.routing, enabled: event.target.checked } })} />Включить правила маршрутизации</label>
+          {draft.name === "all" && <p className="settings-help">Это поток по умолчанию: он получает сообщения, не подошедшие под включённые правила. Пункт «Все сообщения» в поиске объединяет все доступные потоки.</p>}
+          <div className="routing-sample">
+            <h3>Пример сообщения</h3>
+            <p className="settings-help">Вставьте JSON, чтобы увидеть поля и проверить настройки до сохранения. Пример не сохраняется.</p>
+            <label>Пример JSON-сообщения<textarea aria-label="Пример JSON-сообщения" rows={6} spellCheck={false} value={sample} onChange={event => setSample(event.target.value)} /></label>
+            {draft.name !== "all" && availableFields.length > 0 && <div className="sample-fields" aria-label="Поля из примера">
+              <p className="settings-help">Добавить условие для поля из этого JSON:</p>
+              {availableFields.slice(0, 40).map(field => <button type="button" key={field.path} disabled={draft.routing.rules.length >= 20} aria-label={`Использовать поле ${field.path}`} onClick={() => setDraft({ ...draft, routing: { ...draft.routing, enabled: true, rules: [...draft.routing.rules, { field: field.path, operator: "exists", value: "" }] } })}>{field.path}</button>)}
+            </div>}
+          </div>
+          {draft.name !== "all" && <>
+          <label className="check-label"><input type="checkbox" checked={draft.routing.enabled} onChange={event => setDraft({ ...draft, routing: { ...draft.routing, enabled: event.target.checked } })} />Включить правила маршрутизации</label>
           <p className="settings-help">Явно указанный поток имеет преимущество. Иначе выбирается первый подходящий поток: меньший номер приоритета проверяется раньше. Сообщения без совпадений попадают в поток по умолчанию.</p>
           <div className="settings-grid"><label>Приоритет<input type="number" min="0" max="1000" required value={draft.routing.priority} onChange={event => setDraft({ ...draft, routing: { ...draft.routing, priority: Number(event.target.value) } })} /></label>
           <label>Совпадение<select value={draft.routing.match} onChange={event => setDraft({ ...draft, routing: { ...draft.routing, match: event.target.value as "all" | "any" } })}><option value="all">Все условия</option><option value="any">Любое условие</option></select></label></div>
@@ -203,16 +227,11 @@ export default function StreamsSettings({ onSaved }: { onSaved: (streams: Stream
             <button type="button" aria-label={`Удалить условие ${index + 1}`} onClick={() => setDraft({ ...draft, routing: { ...draft.routing, rules: draft.routing.rules.filter((_, i) => i !== index) } })}>Удалить</button>
           </div>)}
           <datalist id="routing-fields">{[...new Set(["source", "host", "level", "facility", "message", ...availableFields.map(field => field.path)])].map(field => <option key={field} value={field} />)}</datalist>
-          <p className="settings-help">Можно указать путь к полю JSON, индекс массива или JSON Pointer. Для массива подходит любой совпавший элемент. Вставьте событие ниже, чтобы увидеть доступные поля.</p>
-          <button type="button" disabled={draft.routing.rules.length >= 20 || draft.name === "all"} onClick={() => setDraft({ ...draft, routing: { ...draft.routing, rules: [...draft.routing.rules, { field: "source", operator: "equals", value: "" }] } })}>Добавить условие</button>
+          <p className="settings-help">Можно указать путь к полю JSON, индекс массива или JSON Pointer. Для массива подходит любой совпавший элемент. Доступные поля берутся из примера выше.</p>
+          <button type="button" disabled={draft.routing.rules.length >= 20} onClick={() => setDraft({ ...draft, routing: { ...draft.routing, rules: [...draft.routing.rules, { field: "source", operator: "equals", value: "" }] } })}>Добавить условие</button>
           </>}
           <div className="routing-test">
-            <h3>Проверить маршрутизацию</h3><p className="settings-help">Вставьте JSON-сообщение для проверки настроек перед сохранением. Пример не сохраняется. Введённые настройки проверяются вместе с остальными сохранёнными потоками.</p>
-            <label>Пример JSON-сообщения<textarea aria-label="Пример JSON-сообщения" rows={6} spellCheck={false} value={sample} onChange={event => setSample(event.target.value)} /></label>
-            {draft.name !== "all" && availableFields.length > 0 && <div className="sample-fields" aria-label="Поля из примера">
-              <p className="settings-help">Добавить условие для поля из этого JSON:</p>
-              {availableFields.slice(0, 40).map(field => <button type="button" key={field.path} disabled={draft.routing.rules.length >= 20} aria-label={`Использовать поле ${field.path}`} onClick={() => setDraft({ ...draft, routing: { ...draft.routing, enabled: true, rules: [...draft.routing.rules, { field: field.path, operator: "exists", value: "" }] } })}>{field.path}</button>)}
-            </div>}
+            <h3>Проверить маршрутизацию</h3><p className="settings-help">Введённые настройки проверяются вместе с остальными сохранёнными потоками.</p>
             <button type="button" disabled={previewBusy || !draft.name || !draft.title} onClick={testRouting}>{previewBusy ? "Проверка…" : "Проверить маршрутизацию"}</button>
             {previewError && <div className="request-error" role="alert">{previewError}</div>}
             {preview && <div className="routing-result" role="status">
@@ -235,18 +254,17 @@ export default function StreamsSettings({ onSaved }: { onSaved: (streams: Stream
           </div>
           <p className="settings-help">Срок хранения 0 означает бессрочное хранение. При положительном значении закрытые индексы удаляются через указанное число дней. Тело сообщения хранится в Redis до подтверждения OpenSearch, затем остаётся только идентификатор. Неопубликованные сообщения защищены.</p>
           <p className="settings-help">Эти правила действуют для новых индексов потоков. Ранее сохранённые логи доступны в поиске и хранятся отдельно.</p>
+          {selected && <section className="settings-card" aria-label="Индексы потока"><div className="settings-heading"><h3>Индексы</h3><div><button type="button" disabled={busy || indexLoading} onClick={() => setRefresh(value => value + 1)}>Обновить индексы</button><button type="button" disabled={busy} onClick={rotate}>Выполнить ротацию</button></div></div>
+            {indexError && <div className="request-error" role="alert">{indexError}</div>}
+            {indexLoading ? <p role="status">Загрузка индексов…</p> : indices.length === 0 ? <p className="settings-help">Индексов пока нет. Первый индекс появится при получении сообщения.</p> : <div className="table-wrap"><table><thead><tr><th>Индекс</th><th>Состояние</th><th>Сообщения</th><th>Размер</th></tr></thead><tbody>{indices.map(index => <tr key={index.name}><td className="index-name">{index.name}<small>{new Date(index.created_at).toLocaleString("ru-RU")}</small></td><td>{index.deleted_at ? "Удалён" : index.sealed_at ? "Закрыт" : "Активен"}</td><td>{index.documents ?? `${index.accepted_count} принято`}</td><td>{index.size_bytes === undefined ? "—" : `${(index.size_bytes / 1048576).toFixed(2)} МиБ`}{index.stats_error && <small>{apiError(index.stats_error, 503).message}</small>}</td></tr>)}</tbody></table></div>}
+          </section>}
         </fieldset>
         <button className="primary" type="submit" disabled={busy}>{busy ? "Выполняется…" : selected ? "Сохранить настройки" : "Создать поток с настройками"}</button>
       </form>
-      {selected && <>
-        <section className="settings-card" aria-label="Индексы потока"><div className="settings-heading"><h3>Индексы</h3><div><button type="button" disabled={busy || indexLoading} onClick={() => setRefresh(value => value + 1)}>Обновить индексы</button><button type="button" disabled={busy} onClick={rotate}>Выполнить ротацию</button></div></div>
-          {indexError && <div className="request-error" role="alert">{indexError}</div>}
-          {indexLoading ? <p role="status">Загрузка индексов…</p> : indices.length === 0 ? <p className="settings-help">Индексов пока нет. Первый индекс появится при получении сообщения.</p> : <div className="table-wrap"><table><thead><tr><th>Индекс</th><th>Состояние</th><th>Сообщения</th><th>Размер</th></tr></thead><tbody>{indices.map(index => <tr key={index.name}><td className="index-name">{index.name}<small>{new Date(index.created_at).toLocaleString("ru-RU")}</small></td><td>{index.deleted_at ? "Удалён" : index.sealed_at ? "Закрыт" : "Активен"}</td><td>{index.documents ?? `${index.accepted_count} принято`}</td><td>{index.size_bytes === undefined ? "—" : `${(index.size_bytes / 1048576).toFixed(2)} МиБ`}{index.stats_error && <small>{apiError(index.stats_error, 503).message}</small>}</td></tr>)}</tbody></table></div>}
-        </section>
-        <section className="settings-card"><h3>Отправка в этот поток</h3><p className="settings-help">Отправьте JSON на <code>/api/streams/{selected}/ingest</code>или добавьте <code>"stream": "{selected}"</code> в сообщение, отправленное на общий адрес приёма.</p>
-          <form onSubmit={send} aria-label="Отправить сообщение"><fieldset disabled={busy}><label>Сообщение<textarea required rows={3} value={message} onChange={event => setMessage(event.target.value)} /></label><label>Источник<input required maxLength={200} value={source} onChange={event => setSource(event.target.value)} /></label><button type="submit" disabled={!message.trim()}>Отправить сообщение</button></fieldset></form>
-        </section>
-      </>}
+      {selected && <details className="ingest-check"><summary>Проверка приёма</summary>{kafkaOnly ? <p className="settings-help">Отправьте JSON с полем <code>"stream": "{selected}"</code> в настроенный топик Kafka.</p> : <><p className="settings-help">Отправьте JSON на <code>/api/streams/{selected}/ingest</code> или добавьте <code>"stream": "{selected}"</code> в сообщение, отправленное на общий адрес приёма.</p>
+        <form onSubmit={send} aria-label="Отправить сообщение"><fieldset disabled={busy}><label>Сообщение<textarea required rows={3} value={message} onChange={event => setMessage(event.target.value)} /></label><label>Источник<input required maxLength={200} value={source} onChange={event => setSource(event.target.value)} /></label><button type="submit" disabled={!message.trim()}>Отправить сообщение</button></fieldset></form>
+      </>}</details>}
+      <div className="stream-danger-zone">{selected && selected !== "all" && <button className="danger" type="button" disabled={busy} onClick={() => { setError(""); setDeleteName(""); setCopyStatus(""); setDeleteOpen(true); }}>Удалить поток</button>}{selected === "all" && <small className="settings-help">Поток по умолчанию нельзя удалить.</small>}</div>
     </div></div>
   </section>;
 }

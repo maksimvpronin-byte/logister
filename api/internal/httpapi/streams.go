@@ -88,7 +88,7 @@ func (s *Server) handleStreamIndices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "Stream not found.")
 		return
 	}
-	indices, err := db.ListManagedIndices(r.Context(), s.pool, s.cfg.OpenSearchIndex, name)
+	indices, err := db.ListManagedIndices(r.Context(), s.database, s.cfg.OpenSearchIndex, name)
 	if err != nil {
 		log.Printf("stream indices: %v", err)
 		writeError(w, 503, "Index status is unavailable.")
@@ -137,7 +137,7 @@ func (s *Server) handleRotateStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rotated, err := db.RotateStream(r.Context(), s.pool, s.cfg.OpenSearchIndex, name, "")
+	rotated, err := db.RotateStream(r.Context(), s.database, s.cfg.OpenSearchIndex, name, "")
 	if err != nil {
 		if errors.Is(err, db.ErrStreamNotFound) {
 			writeError(w, 404, "Stream not found.")

@@ -2,192 +2,245 @@ package db
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type ManagedIndex struct {
 	Name          string        `json:"name"`
+	Namespace     string        `json:"-"`
 	Stream        string        `json:"stream"`
 	Generation    int64         `json:"generation"`
 	CreatedAt     time.Time     `json:"created_at"`
 	SealedAt      *time.Time    `json:"sealed_at"`
 	DeletedAt     *time.Time    `json:"deleted_at"`
 	AcceptedCount int64         `json:"accepted_count"`
+	KafkaPending  int64         `json:"-"`
 	Storage       StorageConfig `json:"-"`
 }
 
-// Lock streams in a stable order before assigning any target. Settings changes
-// and rotation serialize with acceptance; one batch remains one transaction.
-func lockEventStreams(ctx context.Context, tx pgx.Tx, events []Event) error {
-	names := map[string]bool{}
-	for _, event := range events {
-		if event.StreamName != "" {
-			names[event.StreamName] = true
-		}
-	}
-	ordered := make([]string, 0, len(names))
-	for name := range names {
-		ordered = append(ordered, name)
-	}
-	sort.Strings(ordered)
-	for _, name := range ordered {
-		var id string
-		if err := tx.QueryRow(ctx, `SELECT id::text FROM streams WHERE name=$1 AND deleted_at IS NULL FOR UPDATE`, name).Scan(&id); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrStreamNotFound
-			}
-			return err
-		}
-	}
-	return nil
+type indexDoc struct {
+	Name          string     `bson:"_id"`
+	Namespace     string     `bson:"namespace"`
+	StreamID      string     `bson:"stream_id"`
+	Generation    int64      `bson:"generation"`
+	CreatedAt     time.Time  `bson:"created_at"`
+	SealedAt      *time.Time `bson:"sealed_at"`
+	DeletedAt     *time.Time `bson:"deleted_at"`
+	AcceptedCount int64      `bson:"accepted_count"`
+	// Legacy completions decrement this field. Subtract the completion
+	// batches recorded separately to obtain the current pending count.
+	KafkaPending   int64     `bson:"kafka_pending,omitempty"`
+	KafkaLastWrite time.Time `bson:"kafka_last_write,omitempty"`
 }
 
-// placeStreamEvents assigns count new events to the open generation. A full or
-// expired generation is sealed once; each generation's counter increases by the
-// number of events placed on it, including when a batch crosses the threshold.
-func placeStreamEvents(ctx context.Context, tx pgx.Tx, namespace, name string, count int) ([]string, error) {
-	if count < 1 {
-		return nil, nil
+func (d *DB) indices() *mongo.Collection { return d.coll("stream_indices") }
+
+func (d *DB) StreamInfo(ctx context.Context, name string) (string, StorageConfig, error) {
+	var doc streamDoc
+	err := d.streams().FindOne(ctx, bson.M{"name": name, "deleted_at": nil}).Decode(&doc)
+	if missing(err) {
+		return "", StorageConfig{}, ErrStreamNotFound
 	}
-	var streamID string
-	var storage StorageConfig
-	if err := tx.QueryRow(ctx, `SELECT id::text,storage FROM streams WHERE name=$1`, name).Scan(&streamID, &storage); err != nil {
-		return nil, err
-	}
-	targets := make([]string, 0, count)
-	for count > 0 {
-		var target string
-		var accepted int64
-		var created time.Time
-		err := tx.QueryRow(ctx, `SELECT index_name,accepted_count,created_at FROM stream_indices WHERE namespace=$1 AND stream_id=$2 AND sealed_at IS NULL`, namespace, streamID).Scan(&target, &accepted, &created)
-		if errors.Is(err, pgx.ErrNoRows) {
-			target, accepted = "", 0
-		} else if err != nil {
-			return nil, err
-		}
-		due := target != "" && ((storage.MaxDocuments > 0 && accepted >= storage.MaxDocuments) || (storage.MaxAgeHours > 0 && time.Since(created) >= time.Duration(storage.MaxAgeHours)*time.Hour))
-		if due {
-			if _, err := tx.Exec(ctx, `UPDATE stream_indices SET sealed_at=now() WHERE index_name=$1`, target); err != nil {
-				return nil, err
-			}
-			target, accepted = "", 0
-		}
-		if target == "" {
-			var generation int64
-			if err := tx.QueryRow(ctx, `SELECT coalesce(max(generation),0)+1 FROM stream_indices WHERE namespace=$1 AND stream_id=$2`, namespace, streamID).Scan(&generation); err != nil {
-				return nil, err
-			}
-			target = fmt.Sprintf("%s-s-%s-%06d", namespace, strings.ReplaceAll(streamID, "-", ""), generation)
-			if _, err := tx.Exec(ctx, `INSERT INTO stream_indices(namespace,stream_id,index_name,generation) VALUES($1,$2,$3,$4)`, namespace, streamID, target, generation); err != nil {
-				return nil, err
-			}
-			accepted = 0
-		}
-		take := count
-		if storage.MaxDocuments > 0 {
-			room := storage.MaxDocuments - accepted
-			if room < 1 {
-				if _, err := tx.Exec(ctx, `UPDATE stream_indices SET sealed_at=now() WHERE index_name=$1`, target); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			if int64(take) > room {
-				take = int(room)
-			}
-		}
-		if _, err := tx.Exec(ctx, `UPDATE stream_indices SET accepted_count=accepted_count+$2 WHERE index_name=$1`, target, take); err != nil {
-			return nil, err
-		}
-		for i := 0; i < take; i++ {
-			targets = append(targets, target)
-		}
-		count -= take
-	}
-	return targets, nil
+	return doc.ID, doc.Storage, err
 }
 
-func ListManagedIndices(ctx context.Context, source streamSource, namespace, name string) ([]ManagedIndex, error) {
-	rows, err := source.Query(ctx, `SELECT i.index_name,s.name,i.generation,i.created_at,i.sealed_at,i.deleted_at,i.accepted_count,s.storage
- FROM stream_indices i JOIN streams s ON s.id=i.stream_id WHERE i.namespace=$1 AND ($2='' OR s.name=$2)
- ORDER BY i.created_at DESC,i.index_name DESC`, namespace, name)
+func (d *DB) NextGeneration(ctx context.Context, namespace, streamID string) (int64, error) {
+	var doc indexDoc
+	err := d.indices().FindOne(ctx, bson.M{"namespace": namespace, "stream_id": streamID}, options.FindOne().SetSort(bson.D{{Key: "generation", Value: -1}})).Decode(&doc)
+	if missing(err) {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return doc.Generation + 1, nil
+}
+
+type GenerationRecord struct {
+	Index, StreamID string
+	Accepted        int64
+	Generation      int64
+	Created         time.Time
+}
+
+func (d *DB) ActiveGeneration(ctx context.Context, namespace, streamID string) (GenerationRecord, bool, error) {
+	var doc indexDoc
+	err := d.indices().FindOne(ctx, bson.M{"namespace": namespace, "stream_id": streamID, "sealed_at": nil, "deleted_at": nil}, options.FindOne().SetSort(bson.D{{Key: "generation", Value: -1}})).Decode(&doc)
+	if missing(err) {
+		return GenerationRecord{}, false, nil
+	}
+	if err != nil {
+		return GenerationRecord{}, false, err
+	}
+	return GenerationRecord{Index: doc.Name, StreamID: streamID, Accepted: doc.AcceptedCount, Generation: doc.Generation, Created: doc.CreatedAt.UTC()}, true, nil
+}
+
+func (d *DB) OpenGeneration(ctx context.Context, namespace, streamID, indexName string, generation int64) error {
+	_, err := d.indices().InsertOne(ctx, indexDoc{Name: indexName, Namespace: namespace, StreamID: streamID, Generation: generation, CreatedAt: time.Now().UTC()})
+	if mongo.IsDuplicateKeyError(err) {
+		return nil
+	}
+	return err
+}
+
+func (d *DB) SealGeneration(ctx context.Context, indexName string, accepted int64) error {
+	now := time.Now().UTC()
+	res, err := d.indices().UpdateOne(ctx, bson.M{"_id": indexName, "sealed_at": nil}, bson.M{"$set": bson.M{"sealed_at": now, "accepted_count": accepted}})
+	if err != nil || res.MatchedCount == 1 {
+		return err
+	}
+	_, err = d.indices().UpdateOne(ctx, bson.M{"_id": indexName}, bson.M{"$set": bson.M{"accepted_count": accepted}})
+	return err
+}
+
+func (d *DB) AcceptedTotals(ctx context.Context, namespace string) (map[string]int64, error) {
+	streams, err := NewStreamStore(d).List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	cursor, err := d.indices().Find(ctx, bson.M{"namespace": namespace})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	byID := map[string]int64{}
+	for cursor.Next(ctx) {
+		var doc indexDoc
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, err
+		}
+		byID[doc.StreamID] += doc.AcceptedCount
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+	totals := map[string]int64{}
+	for _, stream := range streams {
+		totals[stream.Name] = byID[stream.ID]
+	}
+	return totals, nil
+}
+
+func ListManagedIndices(ctx context.Context, database *DB, namespace, name string) ([]ManagedIndex, error) {
+	streams, err := database.streams().Find(ctx, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	defer streams.Close(ctx)
+	byID := map[string]streamDoc{}
+	for streams.Next(ctx) {
+		var doc streamDoc
+		if err := streams.Decode(&doc); err != nil {
+			return nil, err
+		}
+		byID[doc.ID] = doc
+	}
+	if err := streams.Err(); err != nil {
+		return nil, err
+	}
+	cursor, err := database.indices().Find(ctx, bson.M{"namespace": bson.M{"$in": []string{namespace, KafkaIndexNamespace(namespace)}}})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
 	out := []ManagedIndex{}
-	for rows.Next() {
-		var i ManagedIndex
-		if err := rows.Scan(&i.Name, &i.Stream, &i.Generation, &i.CreatedAt, &i.SealedAt, &i.DeletedAt, &i.AcceptedCount, &i.Storage); err != nil {
+	var kafkaIndices []string
+	for cursor.Next(ctx) {
+		var doc indexDoc
+		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
-		out = append(out, i)
-	}
-	return out, rows.Err()
-}
-
-// expected prevents a delayed worker from sealing a newer generation. No empty
-// successor is created: the next accepted event allocates one under the same lock.
-func RotateStream(ctx context.Context, source transactionSource, namespace, name, expected string) (bool, error) {
-	tx, err := source.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(context.Background())
-	var id string
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM streams WHERE name=$1 AND deleted_at IS NULL FOR UPDATE`, name).Scan(&id); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, ErrStreamNotFound
+		stream, ok := byID[doc.StreamID]
+		if !ok || (name != "" && stream.Name != name) {
+			continue
 		}
-		return false, err
+		if doc.Namespace == KafkaIndexNamespace(namespace) {
+			kafkaIndices = append(kafkaIndices, doc.Name)
+		}
+		out = append(out, ManagedIndex{Name: doc.Name, Namespace: doc.Namespace, Stream: stream.Name, Generation: doc.Generation, CreatedAt: doc.CreatedAt, SealedAt: doc.SealedAt, DeletedAt: doc.DeletedAt, AcceptedCount: doc.AcceptedCount, KafkaPending: doc.KafkaPending, Storage: stream.Storage})
 	}
-	tag, err := tx.Exec(ctx, `UPDATE stream_indices SET sealed_at=now() WHERE namespace=$1 AND stream_id=$2 AND sealed_at IS NULL AND ($3='' OR index_name=$3)`, namespace, id, expected)
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+	completed, err := database.kafkaCompletionTotals(ctx, kafkaIndices)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return tag.RowsAffected() > 0, tx.Commit(ctx)
+	for i := range out {
+		out[i].KafkaPending = max(int64(0), out[i].KafkaPending-completed[out[i].Name].Count)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].Name > out[j].Name
+	})
+	return out, nil
 }
 
-// DeleteExpired never deletes an active index or one with unpublished events.
-// The durable target is immutable, so retries cannot recreate expired documents.
-// Only payloads are cleared; hashes/IDs stay as deduplication tombstones.
-func DeleteExpired(ctx context.Context, source transactionSource, namespace, name string, remove func(string) error) (bool, error) {
-	tx, err := source.Begin(ctx)
+// expected prevents a delayed worker from sealing a newer generation. The next
+// accepted event allocates the successor.
+func RotateStream(ctx context.Context, database *DB, namespace, name, expected string) (bool, error) {
+	id, _, err := database.StreamInfo(ctx, name)
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback(context.Background())
-	var streamID string
-	var retention int
-	if err := tx.QueryRow(ctx, `SELECT s.id::text,(s.storage->>'retention_days')::int FROM streams s JOIN stream_indices i ON i.stream_id=s.id WHERE i.namespace=$1 AND i.index_name=$2 FOR UPDATE OF s`, namespace, name).Scan(&streamID, &retention); err != nil {
+	filter := bson.M{"namespace": bson.M{"$in": []string{namespace, KafkaIndexNamespace(namespace)}}, "stream_id": id, "sealed_at": nil}
+	if expected != "" {
+		filter["_id"] = expected
+	}
+	res, err := database.indices().UpdateMany(ctx, filter, bson.M{"$set": bson.M{"sealed_at": time.Now().UTC()}})
+	if err != nil {
 		return false, err
 	}
-	if retention <= 0 {
+	return res.ModifiedCount > 0, nil
+}
+
+// DeleteExpired never deletes an active index. Unpublished messages are refused
+// by the caller, which checks the Redis journal before asking.
+func DeleteExpired(ctx context.Context, database *DB, namespace, name string, remove func(string) error) (bool, error) {
+	var doc indexDoc
+	err := database.indices().FindOne(ctx, bson.M{"_id": name, "namespace": namespace}).Decode(&doc)
+	if missing(err) {
+		return false, fmt.Errorf("index %s: %w", name, ErrNotFound)
+	}
+	if err != nil {
+		return false, err
+	}
+	var stream streamDoc
+	if err := database.streams().FindOne(ctx, bson.M{"_id": doc.StreamID}).Decode(&stream); err != nil {
+		return false, err
+	}
+	if stream.Storage.RetentionDays <= 0 || doc.DeletedAt != nil || doc.SealedAt == nil || time.Since(*doc.SealedAt) < time.Duration(stream.Storage.RetentionDays)*24*time.Hour {
 		return false, nil
 	}
-	var eligible bool
-	if err := tx.QueryRow(ctx, `SELECT deleted_at IS NULL AND sealed_at IS NOT NULL AND sealed_at < now()-make_interval(days=>$2)
- AND NOT EXISTS(SELECT 1 FROM ingest_events WHERE target_index=$1 AND published_at IS NULL)
- FROM stream_indices WHERE index_name=$1 FOR UPDATE`, name, retention).Scan(&eligible); err != nil {
-		return false, err
+	// Pending placements can still be retried. Give any concurrent duplicate
+	// publication a grace interval after the first writer completes.
+	pending := doc.KafkaPending
+	lastWrite := doc.KafkaLastWrite
+	if doc.KafkaPending > 0 {
+		completed, err := database.kafkaCompletionTotals(ctx, []string{doc.Name})
+		if err != nil {
+			return false, err
+		}
+		record := completed[doc.Name]
+		pending -= record.Count
+		if record.LastWrite.After(lastWrite) {
+			lastWrite = record.LastWrite
+		}
 	}
-	if !eligible {
+	if pending != 0 || time.Since(lastWrite) < time.Minute {
 		return false, nil
 	}
 	if err := remove(name); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE ingest_events SET document=NULL WHERE index_name=$1 AND target_index=$2 AND published_at IS NOT NULL`, namespace, name); err != nil {
-		return false, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE stream_indices SET deleted_at=now() WHERE index_name=$1`, name); err != nil {
-		return false, err
-	}
-	return true, tx.Commit(ctx)
+	_, err = database.indices().UpdateOne(ctx, bson.M{"_id": name}, bson.M{"$set": bson.M{"deleted_at": time.Now().UTC()}})
+	return err == nil, err
 }

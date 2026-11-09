@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/logister/logister/api/internal/db"
+	"net/http"
 	"reflect"
 	"testing"
 )
@@ -12,6 +14,25 @@ type fakeIngestStats struct {
 	ids   []string
 	calls int
 	err   error
+}
+
+func TestKafkaOnlyDisablesHTTPIngestAndKeepsScopedStats(t *testing.T) {
+	s, _, _ := authFixture(t)
+	s.cfg.KafkaDirect = true
+	h := s.Handler()
+	admin := loginCookie(t, h, "local-admin", "local", "local-test-password")
+	for _, path := range []string{"/api/ingest/json", "/api/streams/payments/ingest", "/api/ingest/fluent-bit"} {
+		w := authRequest(h, "POST", path, `{"message":"must not be accepted"}`, admin)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+	}
+	operator := loginCookie(t, h, "operator", "ldap", "correct")
+	w := authRequest(h, "GET", "/api/ingest/stats", "", operator)
+	var stats db.IngestStats
+	if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil || w.Code != 200 || len(stats.Streams) != 1 || stats.Streams[0].ID != "pay-id" {
+		t.Fatalf("scoped stats: %d %s (%v)", w.Code, w.Body.String(), err)
+	}
 }
 
 func (f *fakeIngestStats) Stats(_ context.Context, _ string, ids []string) (db.IngestStats, error) {

@@ -10,21 +10,31 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/logister/logister/api/internal/db"
+	"github.com/logister/logister/api/internal/telemetry"
 	"github.com/redis/go-redis/v9"
 )
 
-// PublishBatch is how many pending messages one publication reads and sends.
-const PublishBatch = 1000
+// PublishBatch caps the records in one publication window. The separate byte
+// budget lets small records fill multiple bulk requests while bounding bodies.
+const PublishBatch = 4000
 
-// Store is the ingest journal. PostgreSQL keeps stream settings and the index
+// Store is the ingest journal. MongoDB keeps stream settings and the index
 // catalog; message bodies and the queue waiting for OpenSearch live here.
 // After a successful publication the body is deleted and the identity hash stays.
 type Store struct {
-	redis   *redis.Client
-	catalog Catalog
+	telemetry         *telemetry.Meter
+	redis             *redis.Client
+	catalog           Catalog
+	maxPublishBytes   int
+	maxPendingBytes   int64
+	profile           bool
+	outputBufferBytes int
+	requireRestore    bool
+	restored          atomic.Bool
 }
 
 func New(client *redis.Client, catalog Catalog) *Store {
@@ -32,6 +42,12 @@ func New(client *redis.Client, catalog Catalog) *Store {
 }
 
 func (s *Store) Ping(ctx context.Context) error { return s.redis.Ping(ctx).Err() }
+
+func (s *Store) RequireRestore() { s.requireRestore = true }
+
+var errJournalRestoring = errors.New("HTTP ingest journal is restoring")
+
+func (s *Store) ready() bool { return !s.requireRestore || s.restored.Load() }
 
 // RestoreCounters copies historical PostgreSQL totals into Redis once.
 // A later restart keeps the Redis counter, which already includes new events.
@@ -45,19 +61,71 @@ func (s *Store) RestoreCounters(ctx context.Context, namespace string) error {
 			return err
 		}
 	}
-	return nil
+	_, err = s.redis.Eval(ctx, bodyLengthLua+`if redis.call('exists',KEYS[1])==0 then local size=0;for _,id in ipairs(redis.call('lrange',KEYS[2],0,-1)) do size=size+bodyLength(ARGV[1]..id) end;redis.call('set',KEYS[1],size) end;return 1`, []string{s.pendingBytesKey(namespace), s.pendingKey(namespace)}, s.eventKey(namespace, "")).Result()
+	if err == nil {
+		s.restored.Store(true)
+	}
+	return err
 }
 
-func (s *Store) Accept(ctx context.Context, index, key, hash string, events []db.Event) (db.Receipt, error) {
+var errQueueFull = errors.New("ingest queue is at its byte budget")
+
+func (s *Store) SetQueueMaxBytes(value int) { s.maxPendingBytes = int64(value) }
+func (s *Store) PendingBytes(ctx context.Context, index string) (int64, error) {
+	return s.counter(ctx, s.pendingBytesKey(index))
+}
+func (s *Store) pendingBytesKey(index string) string { return "logister:pending-bytes:" + index }
+func (s *Store) Accept(ctx context.Context, index, key, hash string, events []db.Event) (receipt db.Receipt, err error) {
+	if !s.ready() {
+		return db.Receipt{}, errJournalRestoring
+	}
+	if s.telemetry != nil {
+		started := time.Now()
+		defer func() { s.telemetry.Observe("journal", time.Since(started), err != nil) }()
+	}
+	started := time.Now()
+	retries := 0
+	if s.profile {
+		defer func() {
+			s.trace("accept_total", map[string]any{"documents": len(events), "ms": time.Since(started).Seconds() * 1000, "budget_retries": retries})
+		}()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		receipt, err := s.acceptOnce(ctx, index, key, hash, events)
+		if !errors.Is(err, errQueueFull) {
+			if err == nil && s.telemetry != nil {
+				s.telemetry.Duplicates(receipt.Duplicates)
+			}
+			return receipt, err
+		}
+		select {
+		case <-ctx.Done():
+			return db.Receipt{}, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+			retries++
+		}
+	}
+}
+func (s *Store) acceptOnce(ctx context.Context, index, key, hash string, events []db.Event) (db.Receipt, error) {
+	started := time.Now()
+	lockMS, dedupeMS, storeMS := 0.0, 0.0, 0.0
+	if s.profile {
+		defer func() {
+			s.trace("accept_once", map[string]any{"documents": len(events), "ms": time.Since(started).Seconds() * 1000, "lock_ms": lockMS, "dedupe_ms": dedupeMS, "store_ms": storeMS})
+		}()
+	}
 	receipt := db.Receipt{Count: len(events)}
 	if len(events) == 0 && key == "" {
 		return receipt, nil
 	}
-	unlock, err := s.lock(ctx, index)
+	owner, unlock, err := s.lock(ctx, index)
 	if err != nil {
 		return db.Receipt{}, err
 	}
 	defer unlock()
+	lockMS = time.Since(started).Seconds() * 1000
 	if key != "" {
 		previous, count, ok, err := s.batch(ctx, index, key)
 		if err != nil {
@@ -70,71 +138,34 @@ func (s *Store) Accept(ctx context.Context, index, key, hash string, events []db
 			return db.Receipt{Count: count, Duplicates: count}, nil
 		}
 	}
+	dedupeStarted := time.Now()
 	fresh, duplicates, err := s.classify(ctx, index, events)
+	dedupeMS = time.Since(dedupeStarted).Seconds() * 1000
 	if err != nil {
 		return db.Receipt{}, err
 	}
-	receipt.Duplicates = duplicates
-	if err := s.storeFresh(ctx, index, fresh); err != nil {
-		return db.Receipt{}, err
-	}
-	if key != "" {
-		if err := s.redis.HSet(ctx, s.batchKey(index, key), "hash", hash, "count", receipt.Count).Err(); err != nil {
+	if s.maxPendingBytes > 0 && len(fresh) > 0 {
+		pending, err := s.PendingBytes(ctx, index)
+		if err != nil {
 			return db.Receipt{}, err
 		}
+		size := int64(0)
+		for _, event := range fresh {
+			size += int64(len(event.Document))
+		}
+		// Permit one byte-bounded batch when empty so a single large event progresses.
+		if pending > 0 && pending+size > s.maxPendingBytes {
+			return db.Receipt{}, errQueueFull
+		}
+	}
+	receipt.Duplicates = duplicates
+	storeStarted := time.Now()
+	err = s.storeFresh(ctx, index, fresh, owner, key, hash, receipt.Count)
+	storeMS = time.Since(storeStarted).Seconds() * 1000
+	if err != nil {
+		return db.Receipt{}, err
 	}
 	return receipt, nil
-}
-
-func (s *Store) Publish(ctx context.Context, index string, write func([]db.Event) error) (int, error) {
-	ids, err := s.redis.LRange(ctx, s.pendingKey(index), 0, int64(PublishBatch-1)).Result()
-	if err != nil || len(ids) == 0 {
-		return 0, err
-	}
-	read := s.redis.Pipeline()
-	commands := make([]*redis.MapStringStringCmd, len(ids))
-	for i, id := range ids {
-		commands[i] = read.HGetAll(ctx, s.eventKey(index, id))
-	}
-	if _, err := read.Exec(ctx); err != nil {
-		return 0, err
-	}
-	events := make([]db.Event, 0, len(ids))
-	kept := make([]string, 0, len(ids))
-	for i, id := range ids {
-		record, err := commands[i].Result()
-		if err != nil {
-			return 0, err
-		}
-		if record["body"] == "" {
-			kept = append(kept, id)
-			continue
-		}
-		events = append(events, db.Event{ID: id, Document: json.RawMessage(record["body"]), TargetIndex: record["target"], StreamName: record["stream"]})
-		kept = append(kept, id)
-	}
-	if len(events) > 0 {
-		if err := write(events); err != nil {
-			return 0, err
-		}
-	}
-	pipe := s.redis.TxPipeline()
-	for _, event := range events {
-		pipe.HDel(ctx, s.eventKey(index, event.ID), "body")
-		if event.StreamName != "" {
-			pipe.Decr(ctx, s.pendingCountKey(index, event.StreamName))
-		}
-		if event.TargetIndex != "" {
-			pipe.Decr(ctx, s.targetPendingKey(index, event.TargetIndex))
-		}
-	}
-	for _, id := range kept {
-		pipe.LRem(ctx, s.pendingKey(index), 1, id)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return 0, err
-	}
-	return len(events), nil
 }
 
 func (s *Store) Pending(ctx context.Context, index string) (int64, error) {
@@ -157,7 +188,7 @@ func (s *Store) ActiveAccepted(ctx context.Context, index, stream string) (strin
 // expected limits the seal to that index; an empty expected seals the active one.
 // A different active index is left untouched so an older catalog row can close on its own.
 func (s *Store) NoteRotation(ctx context.Context, index, stream, expected string) (bool, error) {
-	unlock, err := s.lock(ctx, index)
+	owner, unlock, err := s.lock(ctx, index)
 	if err != nil {
 		return false, err
 	}
@@ -172,7 +203,7 @@ func (s *Store) NoteRotation(ctx context.Context, index, stream, expected string
 	if err := s.catalog.SealGeneration(ctx, gen.Index, gen.Accepted); err != nil {
 		return false, err
 	}
-	if err := s.redis.Del(ctx, s.activeKey(index, stream)).Err(); err != nil {
+	if err := s.withIntakeLease(ctx, index, owner, func(pipe redis.Pipeliner) error { pipe.Del(ctx, s.activeKey(index, stream)); return nil }); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -190,15 +221,33 @@ func (s *Store) Stats(ctx context.Context, namespace string, ids []string) (db.I
 			allowed[id] = true
 		}
 	}
+	type streamCounters struct {
+		stream            db.Stream
+		accepted, pending *redis.StringCmd
+	}
+	counters := make([]streamCounters, 0, len(streams))
+	// Ingestion updates both counters atomically. Read them in one Redis
+	// transaction so a concurrent intake cannot split the snapshot.
+	pipe := s.redis.TxPipeline()
 	for _, stream := range streams {
 		if ids != nil && !allowed[stream.ID] {
 			continue
 		}
-		accepted, err := s.counter(ctx, s.acceptedKey(namespace, stream.Name))
+		counters = append(counters, streamCounters{
+			stream:   stream,
+			accepted: pipe.Get(ctx, s.acceptedKey(namespace, stream.Name)),
+			pending:  pipe.Get(ctx, s.pendingCountKey(namespace, stream.Name)),
+		})
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return result, err
+	}
+	for _, values := range counters {
+		accepted, err := readCounter(values.accepted)
 		if err != nil {
 			return result, err
 		}
-		pending, err := s.counter(ctx, s.pendingCountKey(namespace, stream.Name))
+		pending, err := readCounter(values.pending)
 		if err != nil {
 			return result, err
 		}
@@ -208,7 +257,7 @@ func (s *Store) Stats(ctx context.Context, namespace string, ids []string) (db.I
 		if pending > accepted {
 			return result, errors.New("pending stream messages exceed the durable accepted counter")
 		}
-		row := db.StreamIngestStats{ID: stream.ID, Name: stream.Name, Title: stream.Title}
+		row := db.StreamIngestStats{ID: values.stream.ID, Name: values.stream.Name, Title: values.stream.Title}
 		row.Accepted = accepted
 		row.Pending = pending
 		row.Published = accepted - pending
@@ -242,17 +291,19 @@ func (s *Store) classify(ctx context.Context, index string, events []db.Event) (
 		fresh = append(fresh, event)
 	}
 	duplicates := len(replays)
+	// One round trip for the whole batch. The caller commits Kafka offsets
+	// only after Accept returns, so a failed lookup leaves the batch unread.
+	found, err := s.loadEvents(ctx, index, fresh)
+	if err != nil {
+		return nil, 0, err
+	}
 	accepted := make([]db.Event, 0, len(fresh))
-	for _, event := range fresh {
-		current, ok, err := s.loadEvent(ctx, index, event.ID)
-		if err != nil {
-			return nil, 0, err
-		}
-		if !ok {
+	for i, event := range fresh {
+		if found[i] == nil {
 			accepted = append(accepted, event)
 			continue
 		}
-		match, err := s.sameIdentity(ctx, index, event, current)
+		match, err := s.sameIdentity(ctx, index, event, *found[i])
 		if err != nil {
 			return nil, 0, err
 		}
@@ -282,11 +333,28 @@ func (s *Store) sameIdentity(ctx context.Context, index string, event db.Event, 
 	if current.hash == event.Hash {
 		return true, nil
 	}
-	if current.version == 1 && event.LegacyHash != "" && current.hash == event.LegacyHash {
+	if current.version == 1 && event.LegacyIdentityHash() != "" && current.hash == event.LegacyIdentityHash() {
 		return true, nil
 	}
-	if current.version == 2 && event.KafkaTransport && current.body != "" && db.KafkaReplayCompatible(payloadJSON(current.body), current.hash, event.Hash) {
-		return true, s.redis.HSet(ctx, s.eventKey(index, event.ID), "hash", event.Hash).Err()
+	if current.version == 2 && event.KafkaTransport {
+		body := current.body
+		if body == "" {
+			values, err := s.redis.HMGet(ctx, s.eventKey(index, event.ID), "body", "body_size").Result()
+			if err != nil {
+				return false, err
+			}
+			value, _ := values[0].(string)
+			size, _ := values[1].(string)
+			raw, err := decodeBody(value, size)
+			if err != nil {
+				return false, err
+			}
+			body = string(raw)
+		}
+		if body != "" && db.KafkaReplayCompatible(payloadJSON(body), current.hash, event.Hash) {
+			value, err := s.redis.Eval(ctx, `local hash=redis.call('hget',KEYS[1],'hash');if hash==ARGV[2] then return 1 end;if hash==ARGV[1] then redis.call('hset',KEYS[1],'hash',ARGV[2]);return 1 end;return 0`, []string{s.eventKey(index, event.ID)}, current.hash, event.Hash).Int()
+			return value == 1, err
+		}
 	}
 	return false, nil
 }
@@ -299,8 +367,8 @@ func payloadJSON(document string) string {
 	return doc.Payload
 }
 
-func (s *Store) storeFresh(ctx context.Context, index string, events []db.Event) error {
-	if len(events) == 0 {
+func (s *Store) storeFresh(ctx context.Context, index string, events []db.Event, owner, key, hash string, count int) error {
+	if len(events) == 0 && key == "" {
 		return nil
 	}
 	grouped := map[string][]db.Event{}
@@ -337,46 +405,66 @@ func (s *Store) storeFresh(ctx context.Context, index string, events []db.Event)
 	for _, event := range plain {
 		rows = append(rows, placed{event, ""})
 	}
-	pipe := s.redis.TxPipeline()
-	streamCounts := map[string]int64{}
-	targetCounts := map[string]int64{}
-	ids := make([]any, 0, len(rows))
-	for _, row := range rows {
-		pipe.HSet(ctx, s.eventKey(index, row.event.ID),
-			"hash", row.event.Hash,
-			"ver", row.event.HashVersion,
-			"body", string(row.event.Document),
-			"target", row.target,
-			"stream", row.event.StreamName,
-		)
-		ids = append(ids, row.event.ID)
-		if row.event.StreamName != "" {
-			streamCounts[row.event.StreamName]++
+	err := s.withIntakeLease(ctx, index, owner, func(pipe redis.Pipeliner) error {
+		streamCounts := map[string]int64{}
+		targetCounts := map[string]int64{}
+		ids := make([]any, 0, len(rows))
+		bodyBytes := int64(0)
+		for _, row := range rows {
+			bodyBytes += int64(len(row.event.Document))
+			body, originalSize := encodeBody(row.event.Document)
+			fields := []any{
+				"hash", row.event.Hash,
+				"ver", row.event.HashVersion,
+				"body", body,
+				"accepted_at_ns", time.Now().UnixNano(),
+				"target", row.target,
+				"stream", row.event.StreamName,
+			}
+			if originalSize != 0 {
+				fields = append(fields, "body_size", originalSize)
+			}
+			pipe.HSet(ctx, s.eventKey(index, row.event.ID), fields...)
+			ids = append(ids, row.event.ID)
+			if row.event.StreamName != "" {
+				streamCounts[row.event.StreamName]++
+			}
+			if row.target != "" {
+				targetCounts[row.target]++
+			}
 		}
-		if row.target != "" {
-			targetCounts[row.target]++
+		if len(ids) > 0 {
+			pipe.RPush(ctx, s.pendingKey(index), ids...)
+			pipe.IncrBy(ctx, s.pendingBytesKey(index), bodyBytes)
 		}
+		for name, count := range streamCounts {
+			pipe.IncrBy(ctx, s.acceptedKey(index, name), count)
+			pipe.IncrBy(ctx, s.pendingCountKey(index, name), count)
+		}
+		for target, count := range targetCounts {
+			pipe.IncrBy(ctx, s.targetPendingKey(index, target), count)
+		}
+		for name, gen := range active {
+			pipe.HSet(ctx, s.activeKey(index, name),
+				"index", gen.Index,
+				"stream_id", gen.StreamID,
+				"accepted", gen.Accepted,
+				"generation", gen.Generation,
+				"created", gen.Created.UnixNano(),
+			)
+		}
+		if key != "" {
+			pipe.HSet(ctx, s.batchKey(index, key), "hash", hash, "count", count)
+		}
+		return nil
+	})
+	if err == nil && s.telemetry != nil {
+		bytes := 0
+		for _, event := range events {
+			bytes += event.InputBytes
+		}
+		s.telemetry.Accepted(len(events), bytes)
 	}
-	if len(ids) > 0 {
-		pipe.RPush(ctx, s.pendingKey(index), ids...)
-	}
-	for name, count := range streamCounts {
-		pipe.IncrBy(ctx, s.acceptedKey(index, name), count)
-		pipe.IncrBy(ctx, s.pendingCountKey(index, name), count)
-	}
-	for target, count := range targetCounts {
-		pipe.IncrBy(ctx, s.targetPendingKey(index, target), count)
-	}
-	for name, gen := range active {
-		pipe.HSet(ctx, s.activeKey(index, name),
-			"index", gen.Index,
-			"stream_id", gen.StreamID,
-			"accepted", gen.Accepted,
-			"generation", gen.Generation,
-			"created", gen.Created.UnixNano(),
-		)
-	}
-	_, err := pipe.Exec(ctx)
 	return err
 }
 
@@ -471,13 +559,33 @@ func (s *Store) open(ctx context.Context, index string, info StreamInfo) (Genera
 	return gen, nil
 }
 
-func (s *Store) loadEvent(ctx context.Context, index, id string) (stored, bool, error) {
-	record, err := s.redis.HGetAll(ctx, s.eventKey(index, id)).Result()
-	if err != nil || len(record) == 0 {
-		return stored{}, false, err
+func (s *Store) loadEvents(ctx context.Context, index string, events []db.Event) ([]*stored, error) {
+	found := make([]*stored, len(events))
+	if len(events) == 0 {
+		return found, nil
 	}
-	version, _ := strconv.Atoi(record["ver"])
-	return stored{hash: record["hash"], body: record["body"], stream: record["stream"], version: version}, true, nil
+	read := s.redis.Pipeline()
+	commands := make([]*redis.SliceCmd, len(events))
+	for i, event := range events {
+		commands[i] = read.HMGet(ctx, s.eventKey(index, event.ID), "hash", "ver", "stream")
+	}
+	if _, err := read.Exec(ctx); err != nil {
+		return nil, err
+	}
+	for i, cmd := range commands {
+		values, err := cmd.Result()
+		if err != nil {
+			return nil, err
+		}
+		if values[0] == nil {
+			continue
+		}
+		hash, _ := values[0].(string)
+		version, _ := strconv.Atoi(fmt.Sprint(values[1]))
+		stream, _ := values[2].(string)
+		found[i] = &stored{hash: hash, version: version, stream: stream}
+	}
+	return found, nil
 }
 
 func (s *Store) loadActive(ctx context.Context, index, stream string) (Generation, error) {
@@ -501,7 +609,11 @@ func (s *Store) batch(ctx context.Context, index, key string) (string, int, bool
 }
 
 func (s *Store) counter(ctx context.Context, key string) (int64, error) {
-	value, err := s.redis.Get(ctx, key).Result()
+	return readCounter(s.redis.Get(ctx, key))
+}
+
+func readCounter(cmd *redis.StringCmd) (int64, error) {
+	value, err := cmd.Result()
 	if errors.Is(err, redis.Nil) {
 		return 0, nil
 	}
@@ -511,28 +623,30 @@ func (s *Store) counter(ctx context.Context, key string) (int64, error) {
 	return strconv.ParseInt(value, 10, 64)
 }
 
-func (s *Store) lock(ctx context.Context, index string) (func(), error) {
+func (s *Store) lock(ctx context.Context, index string) (string, func(), error) {
 	token := make([]byte, 8)
 	if _, err := rand.Read(token); err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	key := "logister:lock:" + index
 	owner := hex.EncodeToString(token)
 	for {
 		ok, err := s.redis.SetNX(ctx, key, owner, 30*time.Second).Result()
 		if err != nil {
-			return nil, err
+			return "", nil, err
 		}
 		if ok {
-			return func() {
-				s.redis.Eval(context.Background(), `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end return 0`, []string{key}, owner)
+			return owner, func() {
+				cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				s.redis.Eval(cleanup, `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end return 0`, []string{key}, owner)
 			}, nil
 		}
 		timer := time.NewTimer(5 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return "", nil, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -553,3 +667,29 @@ func (s *Store) targetPendingKey(index, target string) string {
 	return "logister:target-pending:" + index + ":" + target
 }
 func (s *Store) batchKey(index, key string) string { return "logister:batch:" + index + ":" + key }
+
+var errIntakeLeaseLost = errors.New("intake lease lost")
+
+// WATCH fences the whole transaction against lease expiry or a replacement
+// owner between classification and EXEC. Body, counters and batch receipt commit
+// together; a stale owner cannot overwrite a newer intake's records.
+func (s *Store) withIntakeLease(ctx context.Context, index, owner string, write func(redis.Pipeliner) error) error {
+	key := "logister:lock:" + index
+	err := s.redis.Watch(ctx, func(tx *redis.Tx) error {
+		current, err := tx.Get(ctx, key).Result()
+		if errors.Is(err, redis.Nil) || (err == nil && current != owner) {
+			return errIntakeLeaseLost
+		}
+		if err != nil {
+			return err
+		}
+		_, err = tx.TxPipelined(ctx, write)
+		return err
+	}, key)
+	if errors.Is(err, redis.TxFailedErr) {
+		return fmt.Errorf("%w: transaction aborted", errIntakeLeaseLost)
+	}
+	return err
+}
+
+func (s *Store) SetTelemetry(m *telemetry.Meter) { s.telemetry = m }

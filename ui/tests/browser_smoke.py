@@ -27,7 +27,7 @@ with sync_playwright() as p:
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(args.url)
-    expect(page.get_by_text('postgres доступен', exact=True)).to_be_visible()
+    expect(page.get_by_text('mongo доступен', exact=True)).to_be_visible()
     expect(page.get_by_text('opensearch доступен', exact=True)).to_be_visible()
     expect(page.locator('tbody tr')).to_have_count(100)
     print('PASS: real UI, metadata and first page loaded', flush=True)
@@ -54,8 +54,9 @@ with sync_playwright() as p:
                 page.get_by_role('button',name='Следующая страница').click()
             steps+=1
             assert steps<200, 'Fixture unexpectedly requires more than 200 pages'
-            expect(page.get_by_text(f'Показаны {steps*100+1}',exact=False)).to_be_visible()
-        expect(page.get_by_text('Показаны 10001',exact=False)).to_be_visible()
+            first_row = f'{steps * 100 + 1:,}'.replace(',', ' ')
+            expect(page.get_by_text(f'Показаны {first_row}', exact=False).first).to_be_visible()
+        expect(page.get_by_text('Показаны 10 001', exact=False).first).to_be_visible()
         page.screenshot(path=str(args.artifacts/'deep-pagination-fixed.png'),full_page=False)
         print('PASS: browser traversed',steps+1,'snapshot pages beyond 10000 results',flush=True)
 
@@ -93,11 +94,11 @@ with sync_playwright() as p:
 
     page.route('**/api/health', lambda route: route.fulfill(
         status=503, content_type='application/json', body=json.dumps({
-            'status': 'degraded', 'postgres': True, 'opensearch': False,
+            'status': 'degraded', 'mongo': True, 'opensearch': False,
             'time': '2026-11-03T00:00:00Z',
         })))
     page.reload()
-    expect(page.get_by_text('postgres доступен', exact=True)).to_be_visible()
+    expect(page.get_by_text('mongo доступен', exact=True)).to_be_visible()
     expect(page.get_by_text('opensearch недоступен', exact=True)).to_be_visible()
     expect(page.get_by_label('Поток', exact=True)).to_contain_text('Web access')
     print('PASS: mocked partial outage preserves PostgreSQL and stream metadata', flush=True)

@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/logister/logister/api/internal/db"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+var errIncompleteShardAcknowledgment = errors.New("bulk item did not reach every shard copy")
 
 // StorageIndex is versioned so upgrading the field representation never deletes
 // the original index. The old concrete index remains available as a backup.
@@ -156,45 +161,118 @@ func (c *Client) PrepareStorage(ctx context.Context, base string) error {
 }
 
 func (c *Client) IndexEvents(ctx context.Context, index string, events []db.Event) error {
-	var body bytes.Buffer
+	return c.indexEvents(ctx, index, events, false)
+}
+
+func bulkBody(index string, events []db.Event) *bytes.Buffer {
+	quotedIndex, _ := json.Marshal(index)
+	const actionPrefix = `{"index":{"_id":`
+	const indexField = `,"_index":`
+	const actionSuffix = "}}\n"
+	metadataBytes := len(actionPrefix) + len(indexField) + len(quotedIndex) + len(actionSuffix) + 3
+	size := 0
 	for _, event := range events {
-		metadata, _ := json.Marshal(map[string]any{"index": map[string]any{"_index": index, "_id": event.ID}})
-		body.Write(metadata)
-		body.WriteByte('\n')
+		size += metadataBytes + len(event.ID) + len(event.Document)
+	}
+	body := bytes.NewBuffer(make([]byte, 0, size))
+	for _, event := range events {
+		quotedID, _ := json.Marshal(event.ID)
+		body.WriteString(actionPrefix)
+		body.Write(quotedID)
+		body.WriteString(indexField)
+		body.Write(quotedIndex)
+		body.WriteString(actionSuffix)
 		body.Write(event.Document)
 		body.WriteByte('\n')
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", "/_bulk", &body)
+	return body
+}
+
+func (c *Client) indexEvents(ctx context.Context, index string, events []db.Event, durable bool) (err error) {
+	started := time.Now()
+	var sent time.Time
+	status, payloadBytes := 0, 0
+	rejected := false
+	if c.telemetry != nil {
+		defer func() { c.telemetry.Bulk(payloadBytes, time.Since(started), err != nil, rejected) }()
+	}
+	if c.bulkProfile {
+		defer func() {
+			finished := time.Now()
+			buildMS, requestMS := finished.Sub(started).Seconds()*1000, 0.0
+			if !sent.IsZero() {
+				buildMS, requestMS = sent.Sub(started).Seconds()*1000, finished.Sub(sent).Seconds()*1000
+			}
+			raw, _ := json.Marshal(map[string]any{"index": index, "documents": len(events), "bytes": payloadBytes, "build_ms": buildMS, "request_ms": requestMS, "total_ms": finished.Sub(started).Seconds() * 1000, "status": status, "success": err == nil})
+			log.Printf("ingest_bulk_profile %s", raw)
+		}()
+	}
+	body := bulkBody(index, events)
+	payloadBytes = body.Len()
+	path := "/_bulk?filter_path=errors,items.index.status,items.index.error,error"
+	if durable {
+		path += ",items.index._shards&wait_for_active_shards=all"
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", path, body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
+	sent = time.Now()
 	response, err := c.os.Perform(req)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
+	status = response.StatusCode
+	rejected = status == 429
 	raw, err := io.ReadAll(response.Body)
 	if err != nil {
 		return err
 	}
 	var result struct {
 		Errors bool `json:"errors"`
-		Items  []map[string]struct {
-			Status int             `json:"status"`
-			Error  json.RawMessage `json:"error"`
+		Items  []struct {
+			Index struct {
+				Status int `json:"status"`
+				Shards struct {
+					Total      int `json:"total"`
+					Successful int `json:"successful"`
+					Failed     int `json:"failed"`
+				} `json:"_shards"`
+			} `json:"index"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return err
 	}
+	missing := response.StatusCode == 404
+	for _, item := range result.Items {
+		missing = missing || item.Index.Status == 404
+		rejected = rejected || item.Index.Status == 429
+	}
+	if missing {
+		c.forgetIndex(index)
+		return fmt.Errorf("%w: %s", ErrIndexNotFound, index)
+	}
 	if response.StatusCode >= 300 || result.Errors || len(result.Items) != len(events) {
 		return fmt.Errorf("bulk publication not acknowledged: %d %s", response.StatusCode, strings.TrimSpace(string(raw)))
 	}
+	var incomplete error
 	for _, item := range result.Items {
-		if item["index"].Status < 200 || item["index"].Status >= 300 {
-			return fmt.Errorf("bulk item not acknowledged: %d", item["index"].Status)
+		if item.Index.Status < 200 || item.Index.Status >= 300 {
+			return fmt.Errorf("bulk item not acknowledged: %d", item.Index.Status)
+		}
+		if !durable {
+			continue
+		}
+		shards := item.Index.Shards
+		if shards.Failed != 0 || shards.Successful <= 0 || shards.Successful > shards.Total {
+			return fmt.Errorf("invalid or failed bulk shard acknowledgments: %+v", shards)
+		}
+		if shards.Successful < shards.Total && incomplete == nil {
+			incomplete = fmt.Errorf("%w: %+v", errIncompleteShardAcknowledgment, shards)
 		}
 	}
-	return nil
+	return incomplete
 }

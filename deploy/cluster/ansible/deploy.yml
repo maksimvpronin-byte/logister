@@ -1,0 +1,9 @@
+---
+- name: Roll out Logister application nodes
+  hosts: logister_nodes
+  order: inventory
+  serial: 1
+  any_errors_fatal: true
+  become: "{{ logister_become | default(true) | bool }}"
+  roles:
+    - logister_node

@@ -6,7 +6,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/logister/logister/api/internal/db"
 	"github.com/logister/logister/api/internal/search"
 )
@@ -19,13 +18,19 @@ type StreamJournal interface {
 
 // MaintainStreams manages only explicitly registered stream indices. Legacy
 // indexes are outside this registry and cannot be deleted by these policies.
-func MaintainStreams(ctx context.Context, pool *pgxpool.Pool, client *search.Client, namespace string, journal StreamJournal) error {
-	indices, err := db.ListManagedIndices(ctx, pool, namespace, "")
+func MaintainStreams(ctx context.Context, database *db.DB, client *search.Client, namespace string, journal StreamJournal) error {
+	indices, err := db.ListManagedIndices(ctx, database, namespace, "")
 	if err != nil {
 		return err
 	}
 	for _, index := range indices {
 		if index.DeletedAt != nil {
+			continue
+		}
+		direct := index.Namespace == db.KafkaIndexNamespace(namespace)
+		// Without the old journal we cannot verify pending deliveries for
+		// legacy generations. Keep them searchable and leave retention alone.
+		if journal == nil && !direct {
 			continue
 		}
 		if index.SealedAt == nil {
@@ -39,12 +44,12 @@ func MaintainStreams(ctx context.Context, pool *pgxpool.Pool, client *search.Cli
 				}
 			}
 			if due {
-				if journal != nil {
+				if journal != nil && !direct {
 					if _, err := journal.NoteRotation(ctx, namespace, index.Stream, index.Name); err != nil {
 						return err
 					}
 				}
-				if _, err := db.RotateStream(ctx, pool, namespace, index.Stream, index.Name); err != nil {
+				if _, err := db.RotateStream(ctx, database, namespace, index.Stream, index.Name); err != nil {
 					if errors.Is(err, db.ErrStreamNotFound) {
 						continue
 					}
@@ -52,7 +57,10 @@ func MaintainStreams(ctx context.Context, pool *pgxpool.Pool, client *search.Cli
 				}
 			}
 		} else if index.Storage.RetentionDays > 0 && time.Since(*index.SealedAt) > time.Duration(index.Storage.RetentionDays)*24*time.Hour {
-			if journal != nil {
+			if index.KafkaPending != 0 {
+				continue
+			}
+			if journal != nil && !direct {
 				pending, err := journal.TargetPending(ctx, namespace, index.Name)
 				if err != nil {
 					return err
@@ -61,7 +69,7 @@ func MaintainStreams(ctx context.Context, pool *pgxpool.Pool, client *search.Cli
 					continue
 				}
 			}
-			if _, err := db.DeleteExpired(ctx, pool, namespace, index.Name, func(name string) error { return client.DeleteStreamIndex(ctx, name) }); err != nil {
+			if _, err := db.DeleteExpired(ctx, database, index.Namespace, index.Name, func(name string) error { return client.DeleteStreamIndex(ctx, name) }); err != nil {
 				return err
 			}
 		}
@@ -69,10 +77,10 @@ func MaintainStreams(ctx context.Context, pool *pgxpool.Pool, client *search.Cli
 	return nil
 }
 
-func RunLifecycle(ctx context.Context, pool *pgxpool.Pool, client *search.Client, namespace string, journal StreamJournal) {
+func RunLifecycle(ctx context.Context, database *db.DB, client *search.Client, namespace string, journal StreamJournal) {
 	for ctx.Err() == nil {
 		task, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := MaintainStreams(task, pool, client, namespace, journal)
+		err := MaintainStreams(task, database, client, namespace, journal)
 		cancel()
 		if err != nil && ctx.Err() == nil {
 			log.Printf("stream lifecycle retry: %v", err)

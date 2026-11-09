@@ -1,0 +1,5 @@
+# Makes the existing LDAP directory reachable only on the Colima lab network.
+services:
+  ldap:
+    ports:
+      - "${LAB_LDAP_BIND_IP:?Set the default VM address}:2389:389"

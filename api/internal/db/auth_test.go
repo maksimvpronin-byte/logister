@@ -2,15 +2,15 @@ package db
 
 import (
 	"errors"
-	"github.com/jackc/pgx/v5"
-	"github.com/logister/logister/api/internal/authz"
 	"testing"
 	"time"
+
+	"github.com/logister/logister/api/internal/authz"
 )
 
 func TestAuthStoreKeepsEmergencyAdminAndRejectsConcurrentEdits(t *testing.T) {
-	ctx, tx := ingestionTransaction(t)
-	store := NewAuthStore(tx)
+	ctx, database := testDB(t)
+	store := NewAuthStore(database)
 	if err := store.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -48,14 +48,14 @@ func TestAuthStoreKeepsEmergencyAdminAndRejectsConcurrentEdits(t *testing.T) {
 	if err = store.DeleteSession(ctx, "token-hash"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.Session(ctx, "token-hash"); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err = store.Session(ctx, "token-hash"); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
 	}
 	session.Expires = time.Now().Add(-time.Hour)
 	if err = store.CreateSession(ctx, "expired-hash", session); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.Session(ctx, "expired-hash"); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err = store.Session(ctx, "expired-hash"); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
 	}
 }

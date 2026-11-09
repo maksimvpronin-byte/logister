@@ -13,7 +13,7 @@ with sync_playwright() as p:
     page=browser.new_page(viewport={'width':1440,'height':1050})
     errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
     page.goto(args.url)
-    expect(page.get_by_text('postgres доступен',exact=True)).to_be_visible()
+    expect(page.get_by_text('mongo доступен',exact=True)).to_be_visible()
     select=page.get_by_label('Поток',exact=True)
     expect(select).to_contain_text('Все сообщения');expect(select).to_contain_text('Сообщения без совпавших правил')
     page.get_by_role('button',name='Потоки и хранение',exact=True).click()

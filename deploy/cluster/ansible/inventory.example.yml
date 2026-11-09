@@ -1,0 +1,20 @@
+---
+all:
+  children:
+    logister_nodes:
+      hosts:
+        node-01:
+          ansible_host: 192.0.2.11
+        node-02:
+          ansible_host: 192.0.2.12
+        node-03:
+          ansible_host: 192.0.2.13
+      vars:
+        ansible_user: deploy
+        logister_api_image: registry.example.net/logister/api:release
+        logister_ui_image: registry.example.net/logister/ui:release
+        logister_cors_origin: https://logs.example.net
+        logister_database_url: mongodb://mongo-01.example.net:27017,mongo-02.example.net:27017,mongo-03.example.net:27017/logister?replicaSet=logister
+        logister_opensearch_url: http://search.example.net:9200
+        logister_kafka_brokers: kafka-01.example.net:9092,kafka-02.example.net:9092,kafka-03.example.net:9092
+        # Supply logister_auth_settings_key and logister_auth_local_password using Vault.

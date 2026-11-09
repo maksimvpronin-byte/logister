@@ -21,16 +21,23 @@ Use **Streams & storage** to create destinations, set routing rules, rotate
 per-stream indices and configure retention. Automatic deletion defaults to off.
 See [stream settings and delivery examples](docs/streams.md).
 
+Administrators can inspect the live pipeline, queues, rates and component resources
+in **Мониторинг**. See [monitoring and metric limits](docs/monitoring.md).
+
+For a production deployment with one or more application nodes, use the
+[Compose and Ansible deployment guide](deploy/cluster/README.md). This setup
+uses shared Kafka, MongoDB and OpenSearch, with Kafka Direct ingestion.
+
 ### Dev mode (faster on WSL)
 
 ```bash
 # infra
-cd /mnt/c/Users/Fidel/Documents/logister && docker compose up -d postgres opensearch
+cd /mnt/c/Users/Fidel/Documents/logister && docker compose up -d mongo opensearch
 
 # API
 export PATH=$HOME/sdk/go/bin:$PATH
 cd api && go build -o /tmp/logister-api ./cmd/api
-DATABASE_URL='postgres://logister:logister@127.0.0.1:5432/logister?sslmode=disable' \
+DATABASE_URL='mongodb://127.0.0.1:27017/logister' \
 OPENSEARCH_URL='http://127.0.0.1:9200' CORS_ORIGIN='http://localhost:3000' \
 SEED_SAMPLE_LOGS=true /tmp/logister-api
 
@@ -41,7 +48,7 @@ cd ui && npm install && npm run dev -- --host 127.0.0.1 --port 3000
 - **UI** — http://127.0.0.1:3000
 - **API** — http://127.0.0.1:8080
 - **OpenSearch** — http://127.0.0.1:9200
-- **Postgres** — `127.0.0.1:5432` (`logister` / `logister` / `logister`)
+- **MongoDB** — `127.0.0.1:27017` (database `logister`, one instance)
 - **Redis** — `127.0.0.1:6379` (intake journal, AOF every second)
 
 Sample messages are seeded on first API start (optional).
@@ -61,7 +68,7 @@ INGEST_HOST=host.docker.internal docker compose -f docker-compose.pipeline.yml u
 
 `loggen` writes JSON lines with stable event IDs every ~700ms and retains rotated
 files; Fluent Bit ships them through Kafka. HTTP 202 confirms the Redis journal
-accepted the batch. OpenSearch indexing follows asynchronously. PostgreSQL keeps
+accepted the batch. OpenSearch indexing follows asynchronously. MongoDB keeps
 stream settings and index generations.
 
 Fluent Bit keeps its read offsets and pending deliveries in the
@@ -76,7 +83,7 @@ as a backup after migration.
 ```bash
 cd /mnt/c/Users/Fidel/Documents/logister/api
 export PATH=$HOME/sdk/go/bin:$PATH
-LOGISTER_TEST_DATABASE_URL='postgres://logister:logister@127.0.0.1:5432/logister?sslmode=disable' go test ./...
+LOGISTER_TEST_MONGO_URL='mongodb://127.0.0.1:27017' go test ./...
 go vet ./...
 cd ..
 docker compose build

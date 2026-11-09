@@ -40,8 +40,9 @@ export const fetchIngestStats = (signal?: AbortSignal) => getJSON<IngestStats>("
 
 export type Health = {
   status: string;
-  postgres: boolean;
+  mongo: boolean;
   redis?: boolean;
+  kafka?: boolean;
   opensearch: boolean;
   time: string;
 };
@@ -94,6 +95,11 @@ export type Message = {
   host: string;
   stream: string;
   facility?: string;
+  service?: string;
+  request_id?: string;
+  trace_id?: string;
+  status?: number;
+  ip?: string;
   fields?: Record<string, unknown>;
   payload?: Record<string, unknown>;
   payload_json?: string;
@@ -125,7 +131,7 @@ async function getJSON<T>(path: string, signal?: AbortSignal, acceptedStatus?: n
 
 export async function fetchHealth(signal?: AbortSignal) {
   const health = await getJSON<Health>("/api/health", signal, 503);
-  if (!health || typeof health.postgres !== "boolean" || typeof health.opensearch !== "boolean") {
+  if (!health || typeof health.mongo !== "boolean" || typeof health.opensearch !== "boolean") {
     throw new Error("Состояние сервисов недоступно");
   }
   return health;
@@ -170,3 +176,16 @@ export const fetchDeletedStreams = () => getJSON<{streams:Stream[]}>("/api/strea
 export type KafkaStatus={enabled:boolean;topic:string;group:string;pause_requested:boolean;running:boolean;available:number;committed:number;lag:number;error?:string;retention_loss:boolean;captured_at:string};
 export const fetchKafkaStatus=(signal?:AbortSignal)=>getJSON<KafkaStatus>("/api/ingest/kafka",signal);
 export const setKafkaPaused=(paused:boolean)=>writeJSON<KafkaStatus>("/api/ingest/kafka","PUT",{paused});
+
+export type MonitorComponent = { status: string; metrics: Record<string, number>; note?: string };
+export type MonitorTiming = { calls: number; errors: number; last_ms: number; p95_ms: number };
+export type MonitorPoint = { at: string; accepted: number | null; published: number | null; input_mib: number | null; pending: number | null; kafka_lag: number | null };
+export type MonitorNode = { id: string; seen_at: string; online: boolean; components: Record<string, string> };
+export type MonitorSnapshot = {
+ nodes?: MonitorNode[]; cluster_stale?: boolean;
+ instance: string; started_at: string; interval_seconds: number; history_seconds: number;
+ config: Record<string, string | number>;
+ latest: null | { at: string; duration_ms: number; rates: { accepted: number | null; published: number | null; input_mib: number | null; bulk_mib: number | null }; process: { accepted: number; input_bytes: number; published: number; duplicates: number; bulk_bytes: number; bulk_requests: number; bulk_errors: number; bulk_rejected: number; buffer_windows: number; buffer_bytes: number; timings: Record<string, MonitorTiming> }; components: Record<string, MonitorComponent>; warnings: string[] };
+ history: MonitorPoint[];
+};
+export const fetchMonitoring = (signal?: AbortSignal) => getJSON<MonitorSnapshot>("/api/monitoring", signal);

@@ -2,11 +2,13 @@
 package kafkainput
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"log"
+	"slices"
 	"sync"
 	"time"
 )
@@ -27,6 +29,8 @@ type Config struct {
 	Brokers      []string
 	Topic, Group string
 	BatchSize    int
+	MaxBytes     int
+	Profile      bool
 }
 type Consumer struct {
 	cfg             Config
@@ -39,17 +43,27 @@ type Consumer struct {
 	lastError       string
 }
 type Status struct {
-	Enabled        bool      `json:"enabled"`
-	Topic          string    `json:"topic"`
-	Group          string    `json:"group"`
-	PauseRequested bool      `json:"pause_requested"`
-	Running        bool      `json:"running"`
-	Error          string    `json:"error,omitempty"`
-	Available      int64     `json:"available"`
-	Committed      int64     `json:"committed"`
-	Lag            int64     `json:"lag"`
-	RetentionLoss  bool      `json:"retention_loss"`
-	CapturedAt     time.Time `json:"captured_at"`
+	Enabled        bool              `json:"enabled"`
+	Topic          string            `json:"topic"`
+	Group          string            `json:"group"`
+	PauseRequested bool              `json:"pause_requested"`
+	Running        bool              `json:"running"`
+	Error          string            `json:"error,omitempty"`
+	Available      int64             `json:"available"`
+	Committed      int64             `json:"committed"`
+	Lag            int64             `json:"lag"`
+	RetentionLoss  bool              `json:"retention_loss"`
+	CapturedAt     time.Time         `json:"captured_at"`
+	Partitions     []PartitionStatus `json:"partitions,omitempty"`
+}
+
+type PartitionStatus struct {
+	Partition       int32  `json:"partition"`
+	StartOffset     int64  `json:"start_offset"`
+	EndOffset       int64  `json:"end_offset"`
+	CommittedOffset *int64 `json:"committed_offset,omitempty"`
+	Lag             int64  `json:"lag"`
+	RetentionLoss   bool   `json:"retention_loss"`
 }
 
 func New(ctx context.Context, cfg Config, state StateStore, accept Accept) (*Consumer, error) {
@@ -67,7 +81,10 @@ func New(ctx context.Context, cfg Config, state StateStore, accept Accept) (*Con
 	}
 	return &Consumer{cfg: cfg, client: client, admin: kadm.NewClient(client), state: state, accept: accept, paused: paused}, nil
 }
-func (c *Consumer) Close()       { c.client.Close() }
+func (c *Consumer) Close() { c.client.Close() }
+func (c *Consumer) Ping(ctx context.Context) error {
+	return c.client.Ping(ctx)
+}
 func (c *Consumer) Paused() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.paused }
 func (c *Consumer) SetPaused(ctx context.Context, value bool) error {
 	c.mu.Lock()
@@ -119,7 +136,9 @@ func (c *Consumer) Run(ctx context.Context) {
 	}
 }
 func (c *Consumer) consume(ctx context.Context) error {
-	cl, err := kgo.NewClient(kgo.SeedBrokers(c.cfg.Brokers...), kgo.ClientID("logister-input"), kgo.ConsumerGroup(c.cfg.Group), kgo.ConsumeTopics(c.cfg.Topic), kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll(), kgo.ConsumeResetOffset(kgo.NoResetOffset().AtStart()), kgo.FetchMaxBytes(8<<20), kgo.FetchMaxWait(100*time.Millisecond))
+	// Fetch limits cover a full batch of the largest accepted message. Offsets
+	// are committed only after the whole batch is stored.
+	cl, err := kgo.NewClient(kgo.SeedBrokers(c.cfg.Brokers...), kgo.ClientID("logister-input"), kgo.ConsumerGroup(c.cfg.Group), kgo.ConsumeTopics(c.cfg.Topic), kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll(), kgo.ConsumeResetOffset(kgo.NoResetOffset().AtStart()), kgo.FetchMaxBytes(32<<20), kgo.FetchMaxPartitionBytes(16<<20), kgo.FetchMaxWait(100*time.Millisecond))
 	if err != nil {
 		return err
 	}
@@ -127,7 +146,9 @@ func (c *Consumer) consume(ctx context.Context) error {
 	c.setRunning(true)
 	for ctx.Err() == nil && !c.Paused() {
 		pollCtx, cancel := context.WithTimeout(ctx, time.Second)
+		pollStarted := time.Now()
 		fetches := cl.PollRecords(pollCtx, c.cfg.BatchSize)
+		pollMS := time.Since(pollStarted).Seconds() * 1000
 		cancel()
 		if ctx.Err() != nil {
 			cl.AllowRebalance()
@@ -144,22 +165,29 @@ func (c *Consumer) consume(ctx context.Context) error {
 			cl.AllowRebalance()
 			continue
 		}
+		if c.cfg.Profile {
+			log.Printf("ingest_stage_profile {\"stage\":\"kafka_poll\",\"documents\":%d,\"ms\":%f}", len(records), pollMS)
+		}
 		messages := make([]Message, len(records))
 		for i, r := range records {
 			messages[i] = Message{r.Topic, r.Partition, r.Offset, r.Value, r.Key}
 		}
 		task, done := context.WithTimeout(ctx, 30*time.Second)
-		err = c.accept(task, messages)
+		err = acceptBounded(task, messages, c.cfg.MaxBytes, c.accept)
 		done()
 		if err == nil {
 			commitCtx, finish := context.WithTimeout(ctx, 10*time.Second)
+			commitStarted := time.Now()
 			err = cl.CommitRecords(commitCtx, records...)
+			if c.cfg.Profile {
+				log.Printf("ingest_stage_profile {\"stage\":\"kafka_commit\",\"documents\":%d,\"ms\":%f}", len(records), time.Since(commitStarted).Seconds()*1000)
+			}
 			finish()
 		}
 		cl.AllowRebalance()
 		// On any failure, close and rejoin from committed offsets. Never advance
-		// past a rejected batch. A PG commit followed by a failed offset commit is
-		// replayed with stable IDs and therefore cannot create a second document.
+		// past a rejected batch. A successful write followed by a failed offset
+		// commit is replayed with stable IDs.
 		if err != nil {
 			return err
 		}
@@ -198,20 +226,50 @@ func (c *Consumer) Status(ctx context.Context) (Status, error) {
 			return out, fmt.Errorf("Kafka start offset missing")
 		}
 		at := start.Offset
+		row := PartitionStatus{Partition: partition, StartOffset: start.Offset, EndOffset: end.Offset}
 		if value, ok := committed.Lookup(c.cfg.Topic, partition); ok && value.At >= 0 {
 			at = value.At
+			row.CommittedOffset = &value.At
 			if at < start.Offset {
-				out.RetentionLoss = true
+				row.RetentionLoss = true
 				at = start.Offset
 			}
 		}
 		if at > end.Offset {
-			out.RetentionLoss = true
+			row.RetentionLoss = true
 			at = end.Offset
 		}
 		out.Available += end.Offset - start.Offset
 		out.Committed += at - start.Offset
-		out.Lag += end.Offset - at
+		row.Lag = end.Offset - at
+		out.Lag += row.Lag
+		out.RetentionLoss = out.RetentionLoss || row.RetentionLoss
+		out.Partitions = append(out.Partitions, row)
 	}
+	slices.SortFunc(out.Partitions, func(a, b PartitionStatus) int { return cmp.Compare(a.Partition, b.Partition) })
 	return out, nil
+}
+
+// Preserve partition/input order across byte-bounded chunks. Offsets for the
+// poll are committed only when every chunk has been accepted successfully.
+func acceptBounded(ctx context.Context, messages []Message, maxBytes int, accept Accept) error {
+	if maxBytes < 1 {
+		maxBytes = 10 << 20
+	}
+	for start := 0; start < len(messages); {
+		end, total := start, 0
+		for end < len(messages) {
+			size := len(messages[end].Value)
+			if end > start && total+size > maxBytes {
+				break
+			}
+			total += size
+			end++
+		}
+		if err := accept(ctx, messages[start:end]); err != nil {
+			return err
+		}
+		start = end
+	}
+	return nil
 }

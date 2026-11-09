@@ -36,15 +36,15 @@ def os_and_api_crash(stack):
     return {'accepted_while_search_offline': 400, 'duplicates_after_restart': 0}
 
 
-def postgres_crash(stack):
-    stack.accept(stack.events('postgres-crash', 100, prefix='pg-before'), 'pg-before')
-    stack.expect_count('postgres-crash', 100)
-    stack.compose('kill', '-s', 'SIGKILL', 'postgres')
-    events = stack.events('postgres-crash', 50, prefix='pg-after')
-    status, body = stack.request('/api/ingest/json', events, key='pg-after')
+def mongo_crash(stack):
+    stack.accept(stack.events('mongo-crash', 100, prefix='mongo-before'), 'mongo-before')
+    stack.expect_count('mongo-crash', 100)
+    stack.compose('kill', '-s', 'SIGKILL', 'mongo')
+    events = stack.events('mongo-crash', 50, prefix='mongo-after')
+    status, body = stack.request('/api/ingest/json', events, key='mongo-after')
     assert status == 503 and body['count'] == 0, (status, body)
-    stack.compose('start', 'postgres'); ready(stack)
-    stack.accept(events, 'pg-after'); stack.expect_count('postgres-crash', 150)
+    stack.compose('start', 'mongo'); ready(stack)
+    stack.accept(events, 'mongo-after'); stack.expect_count('mongo-crash', 150)
     return {'previously_acknowledged': 100, 'retried_after_recovery': 50}
 
 
@@ -207,7 +207,7 @@ def ui_proxy_recovery(stack):
 
 
 def run_faults(stack, only=None):
-    actions=[os_and_api_crash, postgres_crash, shipper_crash, rotation, shipper_burst,
+    actions=[os_and_api_crash, mongo_crash, shipper_crash, rotation, shipper_burst,
              postgres_disk_full, source_disk_full, shipper_disk_full, ui_proxy_recovery]
     if only: actions=[action for action in actions if action.__name__==only];assert actions, 'Unknown drill'
     for action in actions:

@@ -3,16 +3,20 @@ package db
 import "testing"
 
 func TestRoutingDefaultsAreInstalledOnceAndStorageIsPreserved(t *testing.T) {
-	ctx, tx := streamTransaction(t)
-	_, err := tx.Exec(ctx, `INSERT INTO streams(name,title,description) VALUES ('all','All messages','Default stream for every message'),('web-access','Web access',''),('system','System','');
- UPDATE streams SET storage='{"max_age_hours":72,"max_size_mb":200,"max_documents":99,"retention_days":7}' WHERE name='web-access'`)
-	if err != nil {
+	ctx, database := testDB(t)
+	for _, stream := range []streamDoc{
+		{ID: newID(), Name: "all", Title: "All messages", Description: "Default stream for every message", Routing: defaultRouting(), Storage: defaultStorage()},
+		{ID: newID(), Name: "web-access", Title: "Web access", Routing: defaultRouting(), Storage: StorageConfig{MaxAgeHours: 72, MaxSizeMB: 200, MaxDocuments: 99, RetentionDays: 7}},
+		{ID: newID(), Name: "system", Title: "System", Routing: defaultRouting(), Storage: defaultStorage()},
+	} {
+		if _, err := database.streams().InsertOne(ctx, stream); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := UpgradeRoutingDefaults(ctx, database); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpgradeRoutingDefaults(ctx, tx); err != nil {
-		t.Fatal(err)
-	}
-	listed, err := NewStreamStore(tx).List(ctx)
+	listed, err := NewStreamStore(database).List(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,28 +32,34 @@ func TestRoutingDefaultsAreInstalledOnceAndStorageIsPreserved(t *testing.T) {
 	}
 	stream := byName["web-access"]
 	stream.Routing.Enabled = false
-	if _, err := NewStreamStore(tx).Save(ctx, stream, false); err != nil {
+	if _, err := NewStreamStore(database).Save(ctx, stream, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpgradeRoutingDefaults(ctx, tx); err != nil {
+	if err := UpgradeRoutingDefaults(ctx, database); err != nil {
 		t.Fatal(err)
 	}
-	var enabled bool
-	if err := tx.QueryRow(ctx, `SELECT (routing->>'enabled')::boolean FROM streams WHERE name='web-access'`).Scan(&enabled); err != nil || enabled {
-		t.Fatal("restart overwrote user's disabled rule", enabled, err)
+	listed, err = NewStreamStore(database).List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range listed {
+		if item.Name == "web-access" && item.Routing.Enabled {
+			t.Fatal("restart overwrote user's disabled rule")
+		}
 	}
 }
+
 func TestRoutingDefaultsPreserveCustomRules(t *testing.T) {
-	ctx, tx := streamTransaction(t)
+	ctx, database := testDB(t)
 	stream := validStream("web-access")
 	stream.Routing = RoutingConfig{Enabled: true, Priority: 5, Match: "any", Rules: []RoutingRule{{Field: "source", Operator: "contains", Value: "custom-web"}}}
-	if _, err := NewStreamStore(tx).Save(ctx, stream, true); err != nil {
+	if _, err := NewStreamStore(database).Save(ctx, stream, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpgradeRoutingDefaults(ctx, tx); err != nil {
+	if err := UpgradeRoutingDefaults(ctx, database); err != nil {
 		t.Fatal(err)
 	}
-	listed, err := NewStreamStore(tx).List(ctx)
+	listed, err := NewStreamStore(database).List(ctx)
 	if err != nil || len(listed) != 1 || listed[0].Routing.Priority != 5 || listed[0].Routing.Rules[0].Value != "custom-web" {
 		t.Fatal(listed, err)
 	}

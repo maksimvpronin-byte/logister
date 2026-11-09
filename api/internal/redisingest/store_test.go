@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -76,6 +77,48 @@ func testStore(t *testing.T) (*Store, *memCatalog) {
 func event(id, stream, body string) db.Event {
 	raw, _ := json.Marshal(map[string]string{"message": body})
 	return db.Event{ID: id, Hash: body, HashVersion: 2, Document: raw, StreamName: stream}
+}
+
+type statsIntakeHook struct {
+	store *Store
+}
+
+func (h statsIntakeHook) DialHook(next redis.DialHook) redis.DialHook {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return next(ctx, network, addr)
+	}
+}
+
+func (h statsIntakeHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h statsIntakeHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		err := next(ctx, cmd)
+		accepted := h.store.acceptedKey("logs", "payments")
+		if cmd.Name() == "get" && cmd.Args()[1] == accepted {
+			// Simulate intake committing after an isolated accepted-counter read.
+			_, updateErr := h.store.redis.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Incr(ctx, accepted)
+				pipe.Incr(ctx, h.store.pendingCountKey("logs", "payments"))
+				return nil
+			})
+			if updateErr != nil {
+				return updateErr
+			}
+		}
+		return err
+	}
+}
+
+func TestStatsReadsAcceptedAndPendingAtomically(t *testing.T) {
+	store, _ := testStore(t)
+	store.redis.AddHook(statsIntakeHook{store: store})
+	stats, err := store.Stats(context.Background(), "logs", nil)
+	if err != nil || len(stats.Streams) != 1 || stats.Totals.Pending != stats.Totals.Accepted {
+		t.Fatalf("inconsistent stats: %+v, %v", stats, err)
+	}
 }
 
 func TestAcceptPublishesThenDropsTheBody(t *testing.T) {
@@ -245,10 +288,63 @@ func TestRestoreCountersDoesNotOverwriteTheJournal(t *testing.T) {
 	}
 }
 
+func TestManyIdentitiesAreReadTogether(t *testing.T) {
+	ctx := context.Background()
+	store, catalog := testStore(t)
+	catalog.streams["payments"] = StreamInfo{ID: "11111111-1111-1111-1111-111111111111", Storage: db.StorageConfig{MaxDocuments: 100000, MaxAgeHours: 24}}
+	events := make([]db.Event, 200)
+	for i := range events {
+		events[i] = event(fmt.Sprintf("id-%d", i), "payments", "same")
+	}
+	receipt, err := store.Accept(ctx, "logs-v2", "", "", events)
+	if err != nil || receipt.Count != 200 || receipt.Duplicates != 0 {
+		t.Fatalf("%+v %v", receipt, err)
+	}
+	again := append(events, event("id-0", "payments", "same"))
+	receipt, err = store.Accept(ctx, "logs-v2", "", "", again)
+	if err != nil || receipt.Duplicates != 201 {
+		t.Fatalf("%+v %v", receipt, err)
+	}
+	changed := event("id-7", "payments", "other")
+	if _, err := store.Accept(ctx, "logs-v2", "", "", []db.Event{changed}); !errors.Is(err, db.ErrIdentityConflict) {
+		t.Fatal(err)
+	}
+}
+
 func TestUnknownStreamIsRejected(t *testing.T) {
 	store, _ := testStore(t)
 	_, err := store.Accept(context.Background(), "logs-v2", "", "", []db.Event{event("a", "missing", "x")})
 	if !errors.Is(err, db.ErrStreamNotFound) {
 		t.Fatal(err)
+	}
+}
+
+func TestLegacyHashIsLazyAndBodiesAreNotReadForNormalReplay(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	calls := 0
+	current := event("fresh", "payments", "new")
+	current.LegacyHashLazy = func() string { calls++; return "old" }
+	if _, err := store.Accept(ctx, "logs", "", "", []db.Event{current}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Accept(ctx, "logs", "", "", []db.Event{current}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatal("legacy hash calculated for current records", calls)
+	}
+	old := event("old", "payments", "old")
+	old.HashVersion = 1
+	if _, err := store.Accept(ctx, "logs", "", "", []db.Event{old}); err != nil {
+		t.Fatal(err)
+	}
+	newer := event("old", "payments", "new-format")
+	newer.LegacyHashLazy = func() string { calls++; return "old" }
+	if r, err := store.Accept(ctx, "logs", "", "", []db.Event{newer}); err != nil || r.Duplicates != 1 {
+		t.Fatal(r, err)
+	}
+	if calls == 0 {
+		t.Fatal("legacy compatibility was not checked")
 	}
 }

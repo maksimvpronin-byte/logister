@@ -39,7 +39,7 @@ class Stack:
             self.out = self.root / 'graphify-out/acceptance' / self.project
             self.out.mkdir(parents=True)
             allocated = {}
-            for key in ['POSTGRES_PORT', 'OPENSEARCH_PORT', 'API_PORT', 'UI_PORT', 'FLUENT_BIT_PORT', 'REDIS_PORT']:
+            for key in ['MONGO_PORT', 'OPENSEARCH_PORT', 'API_PORT', 'UI_PORT', 'FLUENT_BIT_PORT', 'REDIS_PORT']:
                 with socket.socket() as sock:
                     sock.bind(('127.0.0.1', 0)); allocated[key] = str(sock.getsockname()[1])
             allocated.update(LOG_INTERVAL_MS='1', LOG_ROTATE_EVERY='50', LOG_MAX_MESSAGES='300', SEED_SAMPLE_LOGS='false')
@@ -47,7 +47,6 @@ class Stack:
             (self.out / 'state.json').write_text(json.dumps({'project': self.project, 'env': allocated}, indent=2))
             (self.out / 'override.json').write_text(json.dumps({'services': {
                 'loggen': {'restart': 'no'},
-                'postgres': {'tmpfs': ['/quota:size=64m,mode=1777']},
             }}))
         self.api = 'http://127.0.0.1:' + self.env['API_PORT']
         self.os = 'http://127.0.0.1:' + self.env['OPENSEARCH_PORT']
@@ -105,8 +104,8 @@ class Stack:
         result = self.docker('exec', '-i', self.container('redis'), 'redis-cli', *args)
         return result.stdout.decode().strip()
 
-    def sql(self, query):
-        result = self.docker('exec', '-i', self.container('postgres'), 'psql', '-U', 'logister', '-d', 'logister', '-At', '-v', 'ON_ERROR_STOP=1', input=query.encode())
+    def mongo(self, script):
+        result = self.docker('exec', '-i', self.container('mongo'), 'mongosh', '--quiet', 'logister', '--eval', script)
         return result.stdout.decode().strip()
 
     def events(self, source, count, prefix=None, size=0):
@@ -206,7 +205,7 @@ class Stack:
         address=f'http://127.0.0.1:{port}'
         log=(self.out/'migration-api.log').open('wb')
         env=dict(os.environ,HTTP_ADDR=f'127.0.0.1:{port}',
-                 DATABASE_URL=f'postgres://logister:logister@127.0.0.1:{self.env["POSTGRES_PORT"]}/logister?sslmode=disable',
+                 DATABASE_URL=f'mongodb://127.0.0.1:{self.env["MONGO_PORT"]}/logister',
                  REDIS_URL=f'redis://127.0.0.1:{self.env["REDIS_PORT"]}',
                  OPENSEARCH_URL=self.os,OPENSEARCH_INDEX=base,SEED_SAMPLE_LOGS='false')
         process=subprocess.Popen([str(binary)],env=env,stdout=log,stderr=log)

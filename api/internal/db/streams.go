@@ -2,55 +2,73 @@ package db
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/logister/logister/api/internal/fieldpath"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/logister/logister/api/internal/fieldpath"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 var ErrStreamNotFound = errors.New("stream not found")
 var ErrStreamExists = errors.New("stream name already exists")
 
-type RoutingRule struct {
-	Field    string `json:"field"`
-	Operator string `json:"operator"`
-	Value    string `json:"value"`
-}
-type RoutingConfig struct {
-	Enabled  bool          `json:"enabled"`
-	Priority int           `json:"priority"`
-	Match    string        `json:"match"`
-	Rules    []RoutingRule `json:"rules"`
-}
-type StorageConfig struct {
-	MaxAgeHours   int   `json:"max_age_hours"`
-	MaxSizeMB     int64 `json:"max_size_mb"`
-	MaxDocuments  int64 `json:"max_documents"`
-	RetentionDays int   `json:"retention_days"`
+type Stream struct {
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	Routing     RoutingConfig `json:"routing"`
+	Storage     StorageConfig `json:"storage"`
 }
 
-const streamSchema = `
-CREATE TABLE IF NOT EXISTS streams (
- id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text UNIQUE NOT NULL,
- title text NOT NULL, description text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now()
-);
-ALTER TABLE streams ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
-ALTER TABLE streams ADD COLUMN IF NOT EXISTS routing jsonb NOT NULL DEFAULT '{"enabled":false,"priority":100,"match":"all","rules":[]}';
-ALTER TABLE streams ADD COLUMN IF NOT EXISTS storage jsonb NOT NULL DEFAULT '{"max_age_hours":24,"max_size_mb":1024,"max_documents":1000000,"retention_days":0}';
-CREATE TABLE IF NOT EXISTS stream_indices (
- namespace text NOT NULL, stream_id uuid NOT NULL REFERENCES streams(id),
- index_name text PRIMARY KEY, generation bigint NOT NULL,
- created_at timestamptz NOT NULL DEFAULT now(), sealed_at timestamptz,
- deleted_at timestamptz, accepted_count bigint NOT NULL DEFAULT 0,
- UNIQUE(namespace,stream_id,generation)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS stream_active_index ON stream_indices(namespace,stream_id) WHERE sealed_at IS NULL;
-`
+type Input struct {
+	ID     string         `json:"id"`
+	Name   string         `json:"name"`
+	Type   string         `json:"type"`
+	Config map[string]any `json:"config"`
+}
+
+type RoutingRule struct {
+	Field    string `json:"field" bson:"field"`
+	Operator string `json:"operator" bson:"operator"`
+	Value    string `json:"value" bson:"value"`
+}
+type RoutingConfig struct {
+	Enabled  bool          `json:"enabled" bson:"enabled"`
+	Priority int           `json:"priority" bson:"priority"`
+	Match    string        `json:"match" bson:"match"`
+	Rules    []RoutingRule `json:"rules" bson:"rules"`
+}
+type StorageConfig struct {
+	MaxAgeHours   int   `json:"max_age_hours" bson:"max_age_hours"`
+	MaxSizeMB     int64 `json:"max_size_mb" bson:"max_size_mb"`
+	MaxDocuments  int64 `json:"max_documents" bson:"max_documents"`
+	RetentionDays int   `json:"retention_days" bson:"retention_days"`
+}
+
+type streamDoc struct {
+	ID          string        `bson:"_id"`
+	Name        string        `bson:"name"`
+	Title       string        `bson:"title"`
+	Description string        `bson:"description"`
+	CreatedAt   time.Time     `bson:"created_at"`
+	DeletedAt   *time.Time    `bson:"deleted_at"`
+	Routing     RoutingConfig `bson:"routing"`
+	Storage     StorageConfig `bson:"storage"`
+}
+
+func (d streamDoc) stream() Stream {
+	if d.Routing.Rules == nil {
+		d.Routing.Rules = []RoutingRule{}
+	}
+	return Stream{ID: d.ID, Name: d.Name, Title: d.Title, Description: d.Description, Routing: d.Routing, Storage: d.Storage}
+}
 
 var streamName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
@@ -86,59 +104,74 @@ func ValidateStream(stream Stream) error {
 	return nil
 }
 
-type streamSource interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-type StreamStore struct{ source streamSource }
+type StreamStore struct{ db *DB }
 
-func NewStreamStore(source streamSource) *StreamStore { return &StreamStore{source: source} }
+func NewStreamStore(database *DB) *StreamStore { return &StreamStore{db: database} }
 
-const streamColumns = `id::text,name,title,description,routing,storage`
+func (d *DB) streams() *mongo.Collection { return d.coll("streams") }
 
-func scanStream(row pgx.Row) (Stream, error) {
-	var s Stream
-	err := row.Scan(&s.ID, &s.Name, &s.Title, &s.Description, &s.Routing, &s.Storage)
-	return s, err
-}
 func (store *StreamStore) List(ctx context.Context) ([]Stream, error) {
-	rows, err := store.source.Query(ctx, `SELECT `+streamColumns+` FROM streams WHERE deleted_at IS NULL ORDER BY (name='all') DESC,(routing->>'priority')::int,name`)
+	cursor, err := store.db.streams().Find(ctx, bson.M{"deleted_at": nil})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer cursor.Close(ctx)
 	out := []Stream{}
-	for rows.Next() {
-		s, err := scanStream(rows)
-		if err != nil {
+	for cursor.Next(ctx) {
+		var doc streamDoc
+		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
-		out = append(out, s)
+		out = append(out, doc.stream())
 	}
-	return out, rows.Err()
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if (out[i].Name == "all") != (out[j].Name == "all") {
+			return out[i].Name == "all"
+		}
+		if out[i].Routing.Priority != out[j].Routing.Priority {
+			return out[i].Routing.Priority < out[j].Routing.Priority
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
+
 func (store *StreamStore) Save(ctx context.Context, s Stream, create bool) (Stream, error) {
 	if err := ValidateStream(s); err != nil {
 		return Stream{}, err
 	}
-	routing, _ := json.Marshal(s.Routing)
-	storage, _ := json.Marshal(s.Storage)
-	var row pgx.Row
+	if s.Routing.Rules == nil {
+		s.Routing.Rules = []RoutingRule{}
+	}
+	title := strings.TrimSpace(s.Title)
 	if create {
-		row = store.source.QueryRow(ctx, `INSERT INTO streams(name,title,description,routing,storage) VALUES($1,$2,$3,$4,$5) RETURNING `+streamColumns, s.Name, strings.TrimSpace(s.Title), s.Description, routing, storage)
-	} else {
-		row = store.source.QueryRow(ctx, `UPDATE streams SET title=$2,description=$3,routing=$4,storage=$5 WHERE name=$1 AND deleted_at IS NULL RETURNING `+streamColumns, s.Name, strings.TrimSpace(s.Title), s.Description, routing, storage)
+		doc := streamDoc{ID: newID(), Name: s.Name, Title: title, Description: s.Description, CreatedAt: time.Now().UTC(), Routing: s.Routing, Storage: s.Storage}
+		if _, err := store.db.streams().InsertOne(ctx, doc); err != nil {
+			if mongo.IsDuplicateKeyError(err) {
+				return Stream{}, ErrStreamExists
+			}
+			return Stream{}, fmt.Errorf("save stream: %w", err)
+		}
+		return doc.stream(), nil
 	}
-	saved, err := scanStream(row)
-	if errors.Is(err, pgx.ErrNoRows) {
+	var doc streamDoc
+	err := store.db.streams().FindOneAndUpdate(ctx,
+		bson.M{"name": s.Name, "deleted_at": nil},
+		bson.M{"$set": bson.M{"title": title, "description": s.Description, "routing": s.Routing, "storage": s.Storage}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&doc)
+	if missing(err) {
 		return Stream{}, ErrStreamNotFound
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		return Stream{}, ErrStreamExists
 	}
 	if err != nil {
 		return Stream{}, fmt.Errorf("save stream: %w", err)
 	}
-	return saved, nil
+	return doc.stream(), nil
+}
+
+func ListStreams(ctx context.Context, database *DB) ([]Stream, error) {
+	return NewStreamStore(database).List(ctx)
 }

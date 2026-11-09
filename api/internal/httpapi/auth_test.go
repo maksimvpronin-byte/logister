@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/logister/logister/api/internal/authz"
 	"github.com/logister/logister/api/internal/config"
 	"github.com/logister/logister/api/internal/db"
@@ -36,7 +35,7 @@ func (m *memoryAuth) CreateSession(_ context.Context, hash string, s db.AuthSess
 func (m *memoryAuth) Session(_ context.Context, hash string) (db.AuthSession, error) {
 	s, ok := m.sessions[hash]
 	if !ok || s.Expires.Before(time.Now()) {
-		return s, pgx.ErrNoRows
+		return s, db.ErrNotFound
 	}
 	return s, nil
 }

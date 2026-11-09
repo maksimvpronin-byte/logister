@@ -1,20 +1,16 @@
 services:
-  postgres:
-    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
-    environment:
-      POSTGRES_USER: logister
-      POSTGRES_PASSWORD: logister
-      POSTGRES_DB: logister
+  mongo:
+    image: mongo:8.0@sha256:b9924c330a8bbc5800fe9c69f04a84e221eca7b28fd049a0354147d9908fa142
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${MONGO_PORT:-27017}:27017"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mongodata:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U logister -d logister"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
   opensearch:
     image: opensearchproject/opensearch:2.17.1@sha256:1193b7c29c5d63028523728243cc4da047ac49f697a8f8105e5aeee2f89bcc4c
@@ -94,13 +90,27 @@ services:
       context: ./api
       dockerfile: Dockerfile
     environment:
+      MONITORING_NODE_ID: ${MONITORING_NODE_ID:-}
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: logister-ingest
       KAFKA_GROUP: logister
+      INGEST_WORKERS: "${INGEST_WORKERS:-4}"
+      KAFKA_BATCH_RECORDS: "${KAFKA_BATCH_RECORDS:-1000}"
+      KAFKA_BATCH_BYTES: "${KAFKA_BATCH_BYTES:-10485760}"
+      OUTPUT_BUFFER_BYTES: "${OUTPUT_BUFFER_BYTES:-33554432}"
+      PUBLISH_BATCH_BYTES: "${PUBLISH_BATCH_BYTES:-10485760}"
+      INGEST_QUEUE_MAX_BYTES: "${INGEST_QUEUE_MAX_BYTES:-268435456}"
+      BULK_MAX_BYTES: "${BULK_MAX_BYTES:-5242880}"
+      BULK_WORKERS: "${BULK_WORKERS:-2}"
+      INGEST_PROFILE_STAGES: "${INGEST_PROFILE_STAGES:-false}"
+      INGEST_PROFILE_BULK: "${INGEST_PROFILE_BULK:-false}"
       HTTP_ADDR: ":8080"
-      DATABASE_URL: postgres://logister:logister@postgres:5432/logister?sslmode=disable
+      DATABASE_URL: mongodb://mongo:27017/logister
       REDIS_URL: redis://redis:6379
       OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_CODEC: "${OPENSEARCH_CODEC:-zstd_no_dict}"
+      OPENSEARCH_CODEC_LEVEL: "${OPENSEARCH_CODEC_LEVEL:-1}"
+      OPENSEARCH_SHARDS: "${OPENSEARCH_SHARDS:-2}"
       OPENSEARCH_INDEX: logs
       CORS_ORIGIN: http://localhost:3000
       SEED_SAMPLE_LOGS: "${SEED_SAMPLE_LOGS:-false}"
@@ -109,7 +119,7 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      postgres:
+      mongo:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -157,7 +167,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  pgdata:
+  mongodata:
   redisdata:
   osdata:
   loggen_data:

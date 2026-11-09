@@ -11,6 +11,16 @@ import (
 )
 
 func ReadAlias(namespace string) string { return namespace + "-read" }
+func searchMetadataProperties() map[string]any {
+	return map[string]any{
+		"payload_json": map[string]any{"type": "text", "index": false},
+		"service":      map[string]any{"type": "keyword"},
+		"request_id":   map[string]any{"type": "keyword"},
+		"trace_id":     map[string]any{"type": "keyword"},
+		"status":       map[string]any{"type": "long"},
+		"ip":           map[string]any{"type": "ip"},
+	}
+}
 func storageDefinition(alias string) map[string]any {
 	return map[string]any{"settings": map[string]any{
 		"number_of_shards": 1, "number_of_replicas": 0,
@@ -20,6 +30,7 @@ func storageDefinition(alias string) map[string]any {
 			"@timestamp": map[string]any{"type": "date"}, "event_id": map[string]any{"type": "keyword"}, "message": map[string]any{"type": "text"},
 			"source": map[string]any{"type": "keyword"}, "level": map[string]any{"type": "keyword"}, "host": map[string]any{"type": "keyword"}, "stream": map[string]any{"type": "keyword"}, "facility": map[string]any{"type": "keyword"}, "fields": map[string]any{"type": "flat_object"},
 			"payload_json": map[string]any{"type": "text", "index": false},
+			"service":      map[string]any{"type": "keyword"}, "request_id": map[string]any{"type": "keyword"}, "trace_id": map[string]any{"type": "keyword"}, "status": map[string]any{"type": "long"}, "ip": map[string]any{"type": "ip"},
 		},
 	}}
 }
@@ -34,7 +45,7 @@ func (c *Client) EnsureReadAlias(ctx context.Context, namespace string) error {
 	return c.ensurePayloadMapping(ctx, ReadAlias(namespace))
 }
 func (c *Client) ensurePayloadMapping(ctx context.Context, index string) error {
-	status, raw, err := c.jsonRequest(ctx, "PUT", "/"+url.PathEscape(index)+"/_mapping", map[string]any{"properties": map[string]any{"payload_json": map[string]any{"type": "text", "index": false}}})
+	status, raw, err := c.jsonRequest(ctx, "PUT", "/"+url.PathEscape(index)+"/_mapping", map[string]any{"properties": searchMetadataProperties()})
 	if err != nil {
 		return err
 	}
@@ -44,26 +55,55 @@ func (c *Client) ensurePayloadMapping(ctx context.Context, index string) error {
 	return nil
 }
 func (c *Client) EnsureStreamIndex(ctx context.Context, namespace, index string) error {
+	return c.prepareOnce(ctx, index, func() error { return c.ensureStreamIndex(ctx, namespace, index, false) })
+}
+func (c *Client) ensureStreamIndex(ctx context.Context, namespace, index string, durable bool) error {
 	status, _, err := c.jsonRequest(ctx, "HEAD", "/"+url.PathEscape(index), nil)
 	if err != nil {
 		return err
 	}
 	if status == 200 {
-		return c.ensurePayloadMapping(ctx, index)
+		return c.prepareExistingStream(ctx, index, durable)
 	}
 	if status != 404 {
 		return fmt.Errorf("check stream index: %d", status)
 	}
-	status, raw, err := c.jsonRequest(ctx, "PUT", "/"+url.PathEscape(index), storageDefinition(ReadAlias(namespace)))
+	definition := storageDefinition(ReadAlias(namespace))
+	settings := definition["settings"].(map[string]any)
+	settings["number_of_shards"] = max(1, c.indexShards)
+	if durable {
+		settings["translog.durability"] = "request"
+		delete(settings, "translog.sync_interval")
+	}
+	if c.indexCodec != "" {
+		settings["codec"] = c.indexCodec
+		if c.codecLevel > 0 {
+			settings["codec.compression_level"] = c.codecLevel
+		}
+	}
+	status, raw, err := c.jsonRequest(ctx, "PUT", "/"+url.PathEscape(index), definition)
 	if err != nil {
 		return err
 	}
 	if status != 200 {
 		// Another publisher can win creation; only accept a ready schema afterward.
 		if c.Ready(ctx, index) == nil {
+			if durable {
+				return c.prepareExistingStream(ctx, index, true)
+			}
 			return nil
 		}
 		return fmt.Errorf("create stream index: %d %s", status, raw)
+	}
+	return nil
+}
+
+func (c *Client) prepareExistingStream(ctx context.Context, index string, durable bool) error {
+	if err := c.ensurePayloadMapping(ctx, index); err != nil {
+		return err
+	}
+	if durable {
+		return c.setRequestDurability(ctx, index)
 	}
 	return nil
 }
@@ -114,6 +154,7 @@ func (c *Client) DeleteStreamIndex(ctx context.Context, index string) error {
 	if status != 200 && status != 404 {
 		return fmt.Errorf("delete stream index: %d %s", status, raw)
 	}
+	c.forgetIndex(index)
 	if status == 200 {
 		var response struct {
 			Acknowledged bool `json:"acknowledged"`
@@ -128,23 +169,8 @@ func (c *Client) DeleteStreamIndex(ctx context.Context, index string) error {
 	return nil
 }
 func (c *Client) PublishEvents(ctx context.Context, namespace string, events []db.Event) error {
-	groups := map[string][]db.Event{}
-	for _, event := range events {
-		target := event.TargetIndex
-		if target == "" {
-			target = namespace
-		}
-		groups[target] = append(groups[target], event)
-	}
-	for target, items := range groups {
-		if target != namespace {
-			if err := c.EnsureStreamIndex(ctx, namespace, target); err != nil {
-				return err
-			}
-		}
-		if err := c.IndexEvents(ctx, target, items); err != nil {
-			return err
-		}
-	}
-	return nil
+	return c.publishEvents(ctx, namespace, events, false)
+}
+func (c *Client) PublishEventsDurable(ctx context.Context, namespace string, events []db.Event) error {
+	return c.publishEvents(ctx, namespace, events, true)
 }

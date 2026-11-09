@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/logister/logister/api/internal/authz"
 	"github.com/logister/logister/api/internal/db"
 	"github.com/logister/logister/api/internal/directory"
@@ -67,7 +66,7 @@ func (s *Server) ConfigureAuth(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	store := db.NewAuthStore(s.pool)
+	store := db.NewAuthStore(s.database)
 	if err = store.Initialize(ctx); err != nil {
 		return err
 	}
@@ -211,7 +210,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"username": identity.Username})
 }
 func (s *Server) identityError(w http.ResponseWriter, err error) {
-	if errors.Is(err, directory.ErrCredentials) || errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, directory.ErrCredentials) || errors.Is(err, db.ErrNotFound) {
 		writeError(w, 401, "Invalid credentials or expired session.")
 		return
 	}

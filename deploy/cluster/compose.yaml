@@ -1,0 +1,38 @@
+services:
+  api:
+    image: "${LOGISTER_API_IMAGE:?set LOGISTER_API_IMAGE}"
+    environment:
+      HTTP_ADDR: ":8080"
+      MONITORING_NODE_ID: "${LOGISTER_NODE_ID:?set a unique LOGISTER_NODE_ID}"
+      DATABASE_URL: "${DATABASE_URL:?set DATABASE_URL}"
+      OPENSEARCH_URL: "${OPENSEARCH_URL:?set OPENSEARCH_URL}"
+      OPENSEARCH_INDEX: "${OPENSEARCH_INDEX:-logs}"
+      OPENSEARCH_SHARDS: "${OPENSEARCH_SHARDS:-3}"
+      KAFKA_BROKERS: "${KAFKA_BROKERS:?set the shared Kafka brokers}"
+      KAFKA_TOPIC: "${KAFKA_TOPIC:-logister-ingest}"
+      KAFKA_GROUP: "${KAFKA_GROUP:-logister}"
+      KAFKA_DIRECT: "true"
+      INGEST_WORKERS: "${INGEST_WORKERS:-2}"
+      BULK_WORKERS: "${BULK_WORKERS:-2}"
+      BULK_MAX_BYTES: "${BULK_MAX_BYTES:-6291456}"
+      AUTH_ENABLED: "true"
+      AUTH_LOCAL_PASSWORD: "${AUTH_LOCAL_PASSWORD:?set AUTH_LOCAL_PASSWORD}"
+      AUTH_SETTINGS_KEY: "${AUTH_SETTINGS_KEY:?set the shared AUTH_SETTINGS_KEY}"
+      AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-true}"
+      CORS_ORIGIN: "${CORS_ORIGIN:?set the browser origin}"
+      SEED_SAMPLE_LOGS: "false"
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+  ui:
+    image: "${LOGISTER_UI_IMAGE:?set LOGISTER_UI_IMAGE}"
+    depends_on:
+      - api
+    ports:
+      - "${LOGISTER_BIND_ADDRESS:-127.0.0.1}:${LOGISTER_UI_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "4", "-O", "/dev/null", "http://127.0.0.1/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped

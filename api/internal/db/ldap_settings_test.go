@@ -6,8 +6,8 @@ import (
 )
 
 func TestLDAPSettingsPersistAndEnvironmentDoesNotOverwrite(t *testing.T) {
-	ctx, tx := ingestionTransaction(t)
-	store := NewAuthStore(tx)
+	ctx, database := testDB(t)
+	store := NewAuthStore(database)
 	if err := store.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}

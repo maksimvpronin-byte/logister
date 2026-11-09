@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 220">
+  <defs>
+    <linearGradient id="wash" x2=".8" y2="1">
+      <stop stop-color="#173b81"/><stop offset=".63" stop-color="#4e8bce"/><stop offset="1" stop-color="#b8d4f1"/>
+    </linearGradient>
+    <g id="petal">
+      <path d="M0 4C-14-5-27-21-22-38c3-10 13-15 22-10 9-5 19 0 22 10 5 17-8 33-22 42Z" fill="url(#wash)"/>
+      <path d="M0-1C-5-12-11-24-9-37m9 34c7-9 11-18 11-27" fill="none" stroke="#e8f5ff" stroke-width="1.4" stroke-linecap="round" opacity=".73"/>
+    </g>
+    <g id="rose">
+      <use href="#petal" transform="rotate(0)"/><use href="#petal" transform="rotate(60)"/>
+      <use href="#petal" transform="rotate(120)"/><use href="#petal" transform="rotate(180)"/>
+      <use href="#petal" transform="rotate(240)"/><use href="#petal" transform="rotate(300)"/>
+      <circle r="22" fill="#a3c4ea"/>
+      <path d="M-17-3C-17-15 1-22 11-13c12 12-2 28-15 23-9-4-7-16 2-19 6-2 10 2 9 6" fill="none" stroke="#214e94" stroke-width="4" stroke-linecap="round"/>
+      <circle cx="2" cy="-1" r="2.6" fill="#123a78"/>
+    </g>
+    <g id="leaf">
+      <path d="M0 0c13-26 31-32 55-29-9 23-29 34-55 29Z" fill="url(#wash)"/>
+      <path d="M3-1c17-8 33-16 49-26m-30 16 3-10m6 5 8-9" stroke="#d6eafa" stroke-width="1.3" fill="none"/>
+    </g>
+  </defs>
+  <g fill="none" stroke="#477abd" stroke-linecap="round">
+    <path d="M31 207c63-41 126-65 199-47 56 14 104 23 153-17 32-26 41-62 23-92-13-21-49-28-63-8-12 16 0 36 17 35 12-1 17-13 10-20M113 168c25-38 60-57 96-64m-1 54c-21 26 11 61 41 48 15-7 17-25 6-32m112-20c43 11 81-1 105-36M279 168c21-32 31-54 16-91-9-24-28-29-43-19" stroke-width="2.4"/>
+    <path d="M50 188c28-8 36-31 26-43-6-7-16-5-19 1m333-104c17-18 35-22 49-13 13 8 13 28 1 33m-124 84c9-7 20-7 27-1" stroke-width="1.6"/>
+  </g>
+  <use href="#leaf" transform="translate(87 180) rotate(-103) scale(.84)"/>
+  <use href="#leaf" transform="translate(124 168) rotate(24) scale(.87)"/>
+  <use href="#leaf" transform="translate(184 153) rotate(-89)"/>
+  <use href="#leaf" transform="translate(239 163) rotate(33) scale(.85)"/>
+  <use href="#leaf" transform="translate(302 170) rotate(17) scale(.92)"/>
+  <use href="#leaf" transform="translate(376 148) rotate(-67) scale(.83)"/>
+  <use href="#leaf" transform="translate(418 146) rotate(-19) scale(.8)"/>
+  <use href="#rose" transform="translate(253 111) scale(1.16)"/>
+  <use href="#rose" transform="translate(361 115) scale(.76) rotate(15)"/>
+  <use href="#rose" transform="translate(131 126) scale(.48) rotate(25)"/>
+  <g fill="#28538f" opacity=".78">
+    <circle cx="113" cy="74" r="3"/><circle cx="124" cy="68" r="2"/><circle cx="145" cy="72" r="2.5"/><circle cx="309" cy="36" r="3"/><circle cx="322" cy="27" r="2"/><circle cx="416" cy="185" r="3"/><circle cx="430" cy="178" r="2"/><circle cx="443" cy="166" r="1.5"/>
+  </g>
+</svg>

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,41 +17,40 @@ import (
 	"github.com/logister/logister/api/internal/redisingest"
 	"github.com/logister/logister/api/internal/search"
 	"github.com/logister/logister/api/internal/seed"
+	"github.com/logister/logister/api/internal/telemetry"
 	"github.com/redis/go-redis/v9"
 )
 
 func main() {
 	cfg := config.FromEnv()
+	if cfg.KafkaOnly() && strings.TrimSpace(cfg.KafkaBrokers) == "" {
+		log.Fatal("KAFKA_BROKERS must be configured for Kafka Direct without Redis")
+	}
 	ctx := context.Background()
 
-	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	database, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("postgres: %v", err)
+		log.Fatalf("mongo: %v", err)
 	}
-	defer pool.Close()
-	if err := db.UpgradeMetadata(ctx, pool); err != nil {
+	defer database.Close()
+	if err := db.UpgradeMetadata(ctx, database); err != nil {
 		log.Fatalf("metadata upgrade: %v", err)
 	}
 
-	redisOptions, err := redis.ParseURL(cfg.RedisURL)
-	if err != nil {
-		log.Fatalf("redis: %v", err)
-	}
-	redisClient := redis.NewClient(redisOptions)
-	defer redisClient.Close()
-	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
-	err = redisClient.Ping(pingCtx).Err()
-	pingCancel()
-	if err != nil {
-		log.Fatalf("redis: %v", err)
-	}
-	journal := redisingest.New(redisClient, redisingest.NewPGCatalog(pool))
+	meter := telemetry.New()
 
 	osClient, err := search.NewClient(cfg.OpenSearchURL)
 	if err != nil {
 		log.Fatalf("opensearch client: %v", err)
 	}
 
+	osClient.SetTelemetry(meter)
+	osClient.ConfigureBulk(cfg.BulkWorkers, cfg.BulkBytes)
+	osClient.ConfigureShards(cfg.IndexShards)
+	if err := osClient.ConfigureCodec(cfg.IndexCodec, cfg.IndexCodecLevel); err != nil {
+		log.Fatalf("opensearch codec: %v", err)
+	}
+	osClient.EnableBulkProfile(cfg.BulkProfile)
 	baseIndex := cfg.OpenSearchIndex
 	prepareCtx, prepareCancel := context.WithTimeout(ctx, 15*time.Second)
 	prepareErr := osClient.PrepareStorage(prepareCtx, baseIndex)
@@ -63,22 +63,60 @@ func main() {
 	}
 	cfg.OpenSearchIndex = search.StorageIndex(baseIndex)
 	cfg.SearchReadIndex = search.ReadAlias(cfg.OpenSearchIndex)
-	if err := journal.RestoreCounters(ctx, cfg.OpenSearchIndex); err != nil {
-		log.Fatalf("redis counters: %v", err)
-	}
 	workerCtx, workerCancel := context.WithCancel(ctx)
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		lifecycleDone := make(chan struct{})
+	srv := httpapi.NewServer(cfg, database, osClient)
+	var lifecycleJournal ingest.StreamJournal
+	if !cfg.KafkaOnly() {
+		redisOptions, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			log.Fatalf("redis: %v", err)
+		}
+		redisClient := redis.NewClient(redisOptions)
+		defer redisClient.Close()
+		pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+		err = redisClient.Ping(pingCtx).Err()
+		pingCancel()
+		if err != nil && !cfg.KafkaDirect {
+			log.Fatalf("redis: %v", err)
+		}
+		journal := redisingest.New(redisClient, redisingest.NewCatalog(database))
+		journal.SetTelemetry(meter)
+		journal.EnableProfile(cfg.StageProfile)
+		journal.SetPublishMaxBytes(cfg.PublishBatchBytes)
+		journal.SetOutputBufferBytes(cfg.OutputBufferBytes)
+		journal.SetQueueMaxBytes(cfg.QueueMaxBytes)
+		if cfg.KafkaDirect {
+			journal.RequireRestore()
+		}
+		if err := journal.RestoreCounters(ctx, cfg.OpenSearchIndex); err != nil {
+			if !cfg.KafkaDirect {
+				log.Fatalf("redis counters: %v", err)
+			}
+			log.Printf("HTTP ingest journal unavailable; direct Kafka ingestion can continue: %v", err)
+			go restoreJournal(workerCtx, journal, cfg.OpenSearchIndex)
+		}
+		srv.UseJournal(journal)
+		lifecycleJournal = journal
+		publisherDone := make(chan struct{})
 		go func() {
-			defer close(lifecycleDone)
-			ingest.RunLifecycle(workerCtx, pool, osClient, cfg.OpenSearchIndex, journal)
+			defer close(publisherDone)
+			ingest.Run(workerCtx, journal, osClient, baseIndex)
 		}()
-		ingest.Run(workerCtx, journal, osClient, baseIndex)
-		<-lifecycleDone
+		defer func() { workerCancel(); <-publisherDone }()
+	} else if prepareErr != nil {
+		preparationDone := make(chan struct{})
+		go func() {
+			defer close(preparationDone)
+			ingest.Run(workerCtx, nil, osClient, baseIndex)
+		}()
+		defer func() { workerCancel(); <-preparationDone }()
+	}
+	lifecycleDone := make(chan struct{})
+	go func() {
+		defer close(lifecycleDone)
+		ingest.RunLifecycle(workerCtx, database, osClient, cfg.OpenSearchIndex, lifecycleJournal)
 	}()
-	defer func() { workerCancel(); <-workerDone }()
+	defer func() { workerCancel(); <-lifecycleDone }()
 
 	if cfg.SeedSampleLogs && prepareErr == nil {
 		if err := seed.SampleLogs(ctx, osClient, cfg.OpenSearchIndex); err != nil {
@@ -86,8 +124,7 @@ func main() {
 		}
 	}
 
-	srv := httpapi.NewServer(cfg, pool, osClient)
-	srv.UseJournal(journal)
+	srv.UseTelemetry(meter)
 	if err := srv.ConfigureAuth(ctx); err != nil {
 		log.Fatalf("authentication: %v", err)
 	}
@@ -100,6 +137,7 @@ func main() {
 		go func() { defer close(done); kafka.Run(workerCtx) }()
 		defer func() { workerCancel(); <-done; kafka.Close() }()
 	}
+	srv.StartMonitoring(workerCtx)
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           srv.Handler(),
@@ -120,4 +158,19 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
+}
+
+func restoreJournal(ctx context.Context, journal *redisingest.Store, namespace string) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := journal.RestoreCounters(ctx, namespace); err == nil {
+				return
+			}
+		}
+	}
 }

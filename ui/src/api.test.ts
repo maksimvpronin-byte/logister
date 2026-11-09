@@ -12,7 +12,7 @@ describe("HTTP client", () => {
     expect([...url.searchParams.entries()]).toEqual([['cursor', 'signed-page']]);
   });
   it("preserves individual service states on HTTP 503", async () => {
-    const body = { status: "degraded", postgres: true, opensearch: false, time: "2026-11-03T00:00:00Z" };
+    const body = { status: "degraded", mongo: true, opensearch: false, time: "2026-11-03T00:00:00Z" };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 503 })));
     await expect(fetchHealth()).resolves.toEqual(body);
   });
